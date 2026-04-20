@@ -2,14 +2,12 @@ import { create } from "zustand";
 import type { DecodedImage, ImageMetadata, ImageStatus } from "./types";
 import { getImageWorker } from "./worker-client";
 
-const DEFAULT_PREVIEW_SIZE = 1024;
-const DEFAULT_SOLVE_SIZE = 700;
+const DEFAULT_SIZE = 700;
 
 interface ImageState {
   status: ImageStatus;
   errorMessage: string | null;
-  preview: ImageBitmap | null;
-  solve: ImageBitmap | null;
+  bitmap: ImageBitmap | null;
   meta: ImageMetadata | null;
   ingest: (blob: Blob, opts?: { filename?: string }) => Promise<void>;
   reset: () => void;
@@ -18,32 +16,27 @@ interface ImageState {
 export const useImageStore = create<ImageState>((set, get) => ({
   status: "idle",
   errorMessage: null,
-  preview: null,
-  solve: null,
+  bitmap: null,
   meta: null,
 
   async ingest(blob, opts) {
     const current = get();
-    current.preview?.close();
-    current.solve?.close();
+    current.bitmap?.close();
     set({
       status: "decoding",
       errorMessage: null,
-      preview: null,
-      solve: null,
+      bitmap: null,
       meta: null,
     });
     try {
       const worker = getImageWorker();
       const decoded: DecodedImage = await worker.ingest(blob, {
-        previewSize: DEFAULT_PREVIEW_SIZE,
-        solveSize: DEFAULT_SOLVE_SIZE,
+        size: DEFAULT_SIZE,
         filename: opts?.filename,
       });
       set({
         status: "ready",
-        preview: decoded.preview,
-        solve: decoded.solve,
+        bitmap: decoded.bitmap,
         meta: decoded.meta,
       });
     } catch (error) {
@@ -55,13 +48,11 @@ export const useImageStore = create<ImageState>((set, get) => ({
 
   reset() {
     const current = get();
-    current.preview?.close();
-    current.solve?.close();
+    current.bitmap?.close();
     set({
       status: "idle",
       errorMessage: null,
-      preview: null,
-      solve: null,
+      bitmap: null,
       meta: null,
     });
   },

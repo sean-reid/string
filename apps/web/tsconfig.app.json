@@ -21,7 +21,8 @@
     "useDefineForClassFields": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@solver/*": ["../../crates/solver/pkg/*"]
     },
     "types": ["vite/client", "vite-plugin-pwa/client"]
   },

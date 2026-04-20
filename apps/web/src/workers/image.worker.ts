@@ -1,6 +1,11 @@
 /// <reference lib="webworker" />
 import * as Comlink from "comlink";
-import type { DecodedImage, ImageMetadata, ImageWorkerApi } from "@/image/types";
+import type {
+  DecodedImage,
+  ImageMetadata,
+  ImageWorkerApi,
+} from "@/image/types";
+import { getSolver } from "@/solver/wasm";
 
 const HEIC_MIMES = new Set(["image/heic", "image/heif"]);
 
@@ -14,7 +19,6 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 /**
  * Reads EXIF orientation from a JPEG header. Returns the clockwise rotation
  * needed to bring the image upright, or 0 for non-JPEG / orientation 1.
- * Orientations 2/4/5/7 (mirrored) are treated as their non-mirrored peers.
  */
 function jpegOrientation(view: DataView): 0 | 90 | 180 | 270 {
   if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return 0;
@@ -79,10 +83,7 @@ function drawRotated(
   ctx.restore();
 }
 
-function squareCrop(
-  source: OffscreenCanvas,
-  target: OffscreenCanvas,
-): void {
+function squareCrop(source: OffscreenCanvas, target: OffscreenCanvas): void {
   const side = Math.min(source.width, source.height);
   const sx = (source.width - side) / 2;
   const sy = (source.height - side) / 2;
@@ -104,10 +105,10 @@ const api: ImageWorkerApi = {
   async ingest(blob, opts) {
     const bytes = await blob.arrayBuffer();
     const hash = await sha256Hex(bytes);
+    const size = opts.size;
 
-    const rotation = blob.type === "image/jpeg"
-      ? jpegOrientation(new DataView(bytes))
-      : 0;
+    const rotation =
+      blob.type === "image/jpeg" ? jpegOrientation(new DataView(bytes)) : 0;
 
     const raw = await decodeBlob(blob);
     const { w: oriented_w, h: oriented_h } = rotatedSize(
@@ -122,30 +123,40 @@ const api: ImageWorkerApi = {
     drawRotated(orientedCtx, raw, rotation);
     raw.close();
 
-    const previewCanvas = new OffscreenCanvas(opts.previewSize, opts.previewSize);
-    const solveCanvas = new OffscreenCanvas(opts.solveSize, opts.solveSize);
-    squareCrop(orientedCanvas, previewCanvas);
-    squareCrop(orientedCanvas, solveCanvas);
+    const cropCanvas = new OffscreenCanvas(size, size);
+    squareCrop(orientedCanvas, cropCanvas);
 
-    const [preview, solve] = await Promise.all([
-      previewCanvas.transferToImageBitmap(),
-      solveCanvas.transferToImageBitmap(),
-    ]);
+    const cropCtx = cropCanvas.getContext("2d");
+    if (!cropCtx) throw new Error("2D context unavailable on crop canvas");
+    const rgba = cropCtx.getImageData(0, 0, size, size);
+
+    const solver = await getSolver();
+    const params = new solver.PreprocessParams();
+    const rgbaView = new Uint8Array(
+      rgba.data.buffer,
+      rgba.data.byteOffset,
+      rgba.data.byteLength,
+    );
+    const processed = solver.preprocess(rgbaView, size, size, params);
+
+    const copy = new Uint8ClampedArray(processed.byteLength);
+    copy.set(processed);
+    const processedImage = new ImageData(copy, size, size);
+    const bitmap = await createImageBitmap(processedImage);
 
     const meta: ImageMetadata = {
       hash,
       sourceWidth: oriented_w,
       sourceHeight: oriented_h,
       rotation,
-      previewSize: opts.previewSize,
-      solveSize: opts.solveSize,
+      size,
       mime: blob.type || "application/octet-stream",
       filename: opts.filename,
       byteLength: blob.size,
     };
 
-    const result: DecodedImage = { preview, solve, meta };
-    return Comlink.transfer(result, [preview, solve]);
+    const result: DecodedImage = { bitmap, meta };
+    return Comlink.transfer(result, [bitmap]);
   },
 };
 

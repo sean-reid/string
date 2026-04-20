@@ -23,7 +23,7 @@ export function CanvasStage() {
       ].join(" ")}
     >
       <ProgressRail />
-      {hasImage ? <LoomPreview /> : <FileDrop />}
+      {hasImage && meta ? <LoomPreview /> : <FileDrop />}
     </div>
   );
 }

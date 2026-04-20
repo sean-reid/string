@@ -8,10 +8,8 @@ export interface ImageMetadata {
   sourceHeight: number;
   /** EXIF rotation applied during decode (0/90/180/270). */
   rotation: 0 | 90 | 180 | 270;
-  /** Resolution of the preview bitmap (square). */
-  previewSize: number;
-  /** Resolution of the internal solver bitmap (square). */
-  solveSize: number;
+  /** Edge length of the square preprocessed bitmap, in pixels. */
+  size: number;
   /** MIME type as reported by the File/Blob. */
   mime: string;
   /** Original filename if available. */
@@ -21,20 +19,16 @@ export interface ImageMetadata {
 }
 
 export interface DecodedImage {
-  /** Displayable preview, already square-cropped and rotated. */
-  preview: ImageBitmap;
-  /** Lower-resolution bitmap used as solver input. */
-  solve: ImageBitmap;
+  /** Preprocessed square bitmap, ready to render and to feed the solver. */
+  bitmap: ImageBitmap;
   meta: ImageMetadata;
 }
 
+export interface IngestOptions {
+  size: number;
+  filename?: string;
+}
+
 export interface ImageWorkerApi {
-  ingest(
-    blob: Blob,
-    opts: {
-      previewSize: number;
-      solveSize: number;
-      filename?: string;
-    },
-  ): Promise<DecodedImage>;
+  ingest(blob: Blob, opts: IngestOptions): Promise<DecodedImage>;
 }

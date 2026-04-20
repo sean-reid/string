@@ -1,26 +1,27 @@
 import { useEffect, useRef } from "react";
 import { useImageStore } from "@/image/store";
 
-const UNDERLAY_OPACITY = 0.18;
+const UNDERLAY_OPACITY = 0.42;
+const DISPLAY_CAP = 1024;
 
 /**
- * Phase 1 renderer. Draws the preview bitmap into a circular "loom" mask
- * with a dimmed opacity. Phase 2 replaces this with PixiJS running in an
- * OffscreenCanvas worker once the solver starts emitting lines.
+ * Phase 1 renderer. Draws the preprocessed bitmap into a circular "loom"
+ * mask. Phase 2 replaces this with PixiJS running in an OffscreenCanvas
+ * worker once the solver starts emitting lines.
  */
 export function LoomPreview() {
-  const preview = useImageStore((s) => s.preview);
+  const bitmap = useImageStore((s) => s.bitmap);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !preview) return;
+    if (!canvas || !bitmap) return;
 
     const parent = canvas.parentElement;
     const size = Math.min(
-      parent?.clientWidth ?? preview.width,
-      parent?.clientHeight ?? preview.height,
-      preview.width,
+      parent?.clientWidth ?? bitmap.width,
+      parent?.clientHeight ?? bitmap.height,
+      DISPLAY_CAP,
     );
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = size * dpr;
@@ -42,7 +43,7 @@ export function LoomPreview() {
     ctx.clip();
 
     ctx.globalAlpha = UNDERLAY_OPACITY;
-    ctx.drawImage(preview, 0, 0, size, size);
+    ctx.drawImage(bitmap, 0, 0, size, size);
     ctx.globalAlpha = 1;
 
     ctx.restore();
@@ -55,7 +56,7 @@ export function LoomPreview() {
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
-  }, [preview]);
+  }, [bitmap]);
 
   return (
     <canvas

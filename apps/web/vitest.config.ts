@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@solver": path.resolve(__dirname, "../../crates/solver/pkg"),
     },
   },
   test: {
