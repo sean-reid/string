@@ -12,7 +12,7 @@ test.describe("app shell", () => {
 
     await expect(page).toHaveTitle("String");
     await expect(
-      page.getByRole("link", { name: "String, home" }),
+      page.getByRole("link", { name: /String, back to the start/i }),
     ).toBeVisible();
     await expect(page.getByRole("img", { name: /empty loom/i })).toBeVisible();
     await expect(page.getByText("Drop an image")).toBeVisible();

@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { Layout } from "@/app/layout";
 import { HomePage } from "@/app/pages/home";
 import { BuildPage } from "@/app/pages/build";
+import { AboutPage } from "@/app/pages/about";
 import { NotFoundPage } from "@/app/pages/not-found";
 import "@/styles/globals.css";
 
@@ -20,6 +21,7 @@ createRoot(rootElement).render(
         <Route element={<Layout />}>
           <Route path="/" element={<HomePage />} />
           <Route path="/build" element={<BuildPage />} />
+          <Route path="/about" element={<AboutPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>
