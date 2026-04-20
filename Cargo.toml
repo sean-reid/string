@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/solver"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

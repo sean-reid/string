@@ -1,0 +1,26 @@
+{
+  "name": "string",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Generative string-art web app.",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "@swc/core"]
+  },
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm solver:build && pnpm --filter web build",
+    "preview": "pnpm --filter web preview",
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm --filter web test",
+    "e2e": "pnpm --filter web e2e",
+    "solver:build": "wasm-pack build crates/solver --target web --release --out-dir pkg",
+    "solver:build:dev": "wasm-pack build crates/solver --target web --dev --out-dir pkg",
+    "solver:test": "cargo test --manifest-path crates/solver/Cargo.toml",
+    "solver:watch": "cargo watch -C crates/solver -s 'wasm-pack build --target web --dev --out-dir pkg'"
+  }
+}

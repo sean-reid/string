@@ -1,0 +1,51 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# builds
+dist
+build
+out
+target
+pkg
+*.wasm
+!public/**/*.wasm
+
+# caches
+.cache
+.turbo
+.vite
+.wrangler
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# test output
+coverage
+playwright-report
+test-results
+.nyc_output
+
+# editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# env
+.env
+.env.local
+.env.*.local
+
+# assistant artifacts (never commit)
+CLAUDE.md
+.claude
+.cursorrules
+.aider*
