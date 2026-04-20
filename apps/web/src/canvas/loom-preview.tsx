@@ -31,26 +31,26 @@ export function LoomPreview() {
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    ctx.fillStyle = "#0E0D0B";
-    ctx.fillRect(0, 0, size, size);
-
     const radius = size / 2 - 1;
+    ctx.save();
     ctx.beginPath();
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
     ctx.clip();
 
+    ctx.fillStyle = "#0E0D0B";
+    ctx.fillRect(0, 0, size, size);
+
     ctx.globalAlpha = UNDERLAY_OPACITY;
     ctx.drawImage(bitmap, 0, 0, size, size);
     ctx.globalAlpha = 1;
-
     ctx.restore();
 
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.strokeStyle = "rgba(231, 227, 219, 0.35)";
+    ctx.strokeStyle = "#141311";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);

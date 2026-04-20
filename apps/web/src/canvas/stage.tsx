@@ -18,10 +18,7 @@ export function CanvasStage() {
           : "Empty loom. Drop an image to begin."
       }
       data-state={hasImage ? "ready" : "empty"}
-      className={[
-        "relative flex min-h-[360px] flex-1 items-center justify-center p-6 transition-colors",
-        hasImage ? "bg-canvas" : "bg-paper",
-      ].join(" ")}
+      className="relative flex min-h-[360px] flex-1 items-center justify-center bg-paper p-6"
     >
       <ProgressRail />
       {hasImage && meta ? (
