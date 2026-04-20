@@ -16,6 +16,12 @@ pkg
 .turbo
 .vite
 .wrangler
+*.tsbuildinfo
+
+# compiled configs (generated from .ts siblings)
+apps/web/vite.config.js
+apps/web/vitest.config.js
+apps/web/playwright.config.js
 
 # logs
 *.log
