@@ -8,7 +8,10 @@
     "node": ">=22.12.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "@swc/core"]
+    "onlyBuiltDependencies": ["esbuild", "@swc/core"],
+    "overrides": {
+      "serialize-javascript@<7.0.5": ">=7.0.5"
+    }
   },
   "scripts": {
     "dev": "pnpm --filter web dev",
