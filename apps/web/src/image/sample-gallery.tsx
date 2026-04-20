@@ -3,30 +3,25 @@ import { useImageStore } from "./store";
 
 interface Sample {
   src: string;
-  label: string;
   description: string;
 }
 
 const SAMPLES: Sample[] = [
   {
     src: "/samples/face1.jpg",
-    label: "Close-up",
-    description: "Woman facing camera, freckles, neutral expression",
+    description: "Portrait on black, tight face crop",
   },
   {
     src: "/samples/face2.jpg",
-    label: "Portrait",
-    description: "Man facing camera, sharp features",
+    description: "Portrait on pink, freckles, direct gaze",
   },
   {
     src: "/samples/face3.jpg",
-    label: "Headshot",
-    description: "Woman in striped shirt, soft golden light",
+    description: "Portrait with striking pale eyes, tan wall",
   },
   {
-    src: "/samples/portrait.jpg",
-    label: "Lioness",
-    description: "Lioness at close range, strong eye contact",
+    src: "/samples/face4.jpg",
+    description: "Portrait in striped shirt, soft golden light",
   },
 ];
 
@@ -36,13 +31,13 @@ export function SampleGallery() {
   const busy = status === "decoding";
 
   const load = useCallback(
-    async (sample: Sample) => {
+    async (sample: Sample, index: number) => {
       if (busy) return;
       try {
         const response = await fetch(sample.src);
-        if (!response.ok) throw new Error(`Sample not found: ${sample.label}`);
+        if (!response.ok) throw new Error(`Sample not found`);
         const blob = await response.blob();
-        await ingest(blob, { filename: sample.label });
+        await ingest(blob, { filename: `sample-${index + 1}` });
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Could not load sample.";
@@ -56,14 +51,14 @@ export function SampleGallery() {
     <section aria-label="Sample images" className="flex w-full max-w-[520px] flex-col items-center gap-3">
       <p className="text-sm text-muted">or try a sample</p>
       <ul className="grid w-full grid-cols-4 gap-3">
-        {SAMPLES.map((sample) => (
+        {SAMPLES.map((sample, index) => (
           <li key={sample.src}>
             <button
               type="button"
-              onClick={() => void load(sample)}
+              onClick={() => void load(sample, index)}
               disabled={busy}
-              aria-label={`Use sample: ${sample.label}. ${sample.description}.`}
-              className="group flex w-full flex-col items-center gap-1.5 rounded-lg transition disabled:opacity-50"
+              aria-label={sample.description}
+              className="group block w-full rounded-lg transition disabled:opacity-50"
             >
               <span className="block aspect-square w-full overflow-hidden rounded-md border border-line ring-0 ring-accent/70 transition group-hover:ring-2 group-focus-visible:ring-2">
                 <img
@@ -74,9 +69,6 @@ export function SampleGallery() {
                   height={160}
                   className="h-full w-full object-cover"
                 />
-              </span>
-              <span className="text-xs text-muted group-hover:text-ink">
-                {sample.label}
               </span>
             </button>
           </li>

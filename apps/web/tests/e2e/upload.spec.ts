@@ -82,7 +82,8 @@ test.describe("upload and decode", () => {
   test("loading a sample ingests without a file picker", async ({ page }) => {
     await page.goto("/");
     await page
-      .getByRole("button", { name: /Use sample: Portrait/i })
+      .locator("section[aria-label='Sample images'] button")
+      .first()
       .click();
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 15_000 });
@@ -92,7 +93,10 @@ test.describe("upload and decode", () => {
   test("Esc cancels a running solver mid-generate", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Close-up/i }).click();
+    await page
+      .locator("section[aria-label='Sample images'] button")
+      .first()
+      .click();
     await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible({
       timeout: 20_000,
     });
@@ -105,7 +109,10 @@ test.describe("upload and decode", () => {
   }) => {
     test.setTimeout(90_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Close-up/i }).click();
+    await page
+      .locator("section[aria-label='Sample images'] button")
+      .first()
+      .click();
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 20_000 });
 
