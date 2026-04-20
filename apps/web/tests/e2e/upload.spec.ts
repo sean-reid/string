@@ -16,8 +16,18 @@ test.describe("upload and decode", () => {
     const input = page.getByLabel("Choose an image to turn into string art");
     await input.setInputFiles(fixture);
 
-    await expect(page.getByText("Image ready")).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/\d+ px preview/)).toBeVisible();
+    const stage = page.getByRole("img", { name: /loom preview/i });
+    await expect(stage).toBeVisible({ timeout: 10_000 });
+    await expect(stage).toHaveAttribute("data-state", "ready");
+
+    const canvas = stage.locator("canvas");
+    await expect(canvas).toBeVisible();
+    const size = await canvas.evaluate((el: HTMLCanvasElement) => ({
+      w: el.width,
+      h: el.height,
+    }));
+    expect(size.w).toBeGreaterThan(0);
+    expect(size.h).toBe(size.w);
   });
 
   test("rejects non-image files with a friendly message", async ({ page }) => {

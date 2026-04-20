@@ -1,5 +1,7 @@
 import { FileDrop } from "@/image/file-drop";
 import { useImageStore } from "@/image/store";
+import { LoomPreview } from "./loom-preview";
+import { ProgressRail } from "./progress-rail";
 
 export function CanvasStage() {
   const status = useImageStore((s) => s.status);
@@ -20,16 +22,8 @@ export function CanvasStage() {
         hasImage ? "bg-canvas" : "bg-paper",
       ].join(" ")}
     >
-      {hasImage ? (
-        <div className="pointer-events-none select-none text-center text-canvas-muted">
-          <p className="font-display text-2xl tracking-tight">Image ready</p>
-          <p className="mt-2 text-sm">
-            {meta.previewSize} px preview, {meta.solveSize} px solver input
-          </p>
-        </div>
-      ) : (
-        <FileDrop />
-      )}
+      <ProgressRail />
+      {hasImage ? <LoomPreview /> : <FileDrop />}
     </div>
   );
 }
