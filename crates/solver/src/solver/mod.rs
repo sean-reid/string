@@ -29,12 +29,12 @@ impl Default for SolverConfig {
     fn default() -> Self {
         Self {
             pin_count: 288,
-            line_budget: 2500,
+            line_budget: 3500,
             opacity: 0.10,
-            min_chord_skip: 10,
-            ban_window: 15,
-            temperature_start: 0.02,
-            temperature_end: 0.002,
+            min_chord_skip: 12,
+            ban_window: 20,
+            temperature_start: 0.008,
+            temperature_end: 0.0008,
         }
     }
 }
@@ -68,9 +68,11 @@ impl Solver {
         let pixel_count = size * size;
         let mut residual = Vec::with_capacity(pixel_count);
         for i in 0..pixel_count {
-            // Convert R channel (grayscale from preprocess) to a darkness target.
+            // The canvas is dark wood and the thread is light, so each line
+            // adds brightness. Residual tracks brightness still needed at
+            // each pixel, starting from the preprocessed luminance.
             let luminance = preprocessed_rgba[i * 4] as f32 / 255.0;
-            residual.push(1.0 - luminance);
+            residual.push(luminance);
         }
 
         let (pins_x, pins_y) = uniform_pins(size, config.pin_count as usize);

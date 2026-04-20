@@ -34,14 +34,19 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
+        // The goal of preprocessing is to keep the tonal field intact so the
+        // solver can concentrate lines in bright regions and leave dark
+        // regions alone. Aggressive CLAHE flattens the histogram and leads
+        // to uniform noise; heavy unsharp amplifies skin texture into high-
+        // frequency lines. Lighter touch everywhere.
         Self {
-            bilateral_sigma_color: 25.0 / 255.0,
-            bilateral_sigma_space: 5.0,
-            clahe_clip: 2.0,
-            clahe_tiles: 8,
-            unsharp_sigma: 1.5,
-            unsharp_amount: 0.7,
-            gamma: 1.3,
+            bilateral_sigma_color: 20.0 / 255.0,
+            bilateral_sigma_space: 3.0,
+            clahe_clip: 0.0, // off; re-enable per-image only if needed
+            clahe_tiles: 0,
+            unsharp_sigma: 1.0,
+            unsharp_amount: 0.25,
+            gamma: 1.0,
             mask_circular: true,
         }
     }
