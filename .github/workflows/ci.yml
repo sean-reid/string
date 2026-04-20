@@ -128,14 +128,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: pnpm audit
         run: pnpm audit --audit-level high
-      - name: cargo install cargo-audit
-        run: cargo install --locked cargo-audit
       - name: cargo audit
-        run: cargo audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
