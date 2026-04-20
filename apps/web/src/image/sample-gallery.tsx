@@ -9,6 +9,11 @@ interface Sample {
 
 const SAMPLES: Sample[] = [
   {
+    src: "/samples/face.jpg",
+    label: "Face",
+    description: "Human headshot in soft window light",
+  },
+  {
     src: "/samples/portrait.jpg",
     label: "Portrait",
     description: "Lioness at close range, strong eye contact",
@@ -17,11 +22,6 @@ const SAMPLES: Sample[] = [
     src: "/samples/landscape.jpg",
     label: "Landscape",
     description: "Highland ridge with a thread of road",
-  },
-  {
-    src: "/samples/pet.jpg",
-    label: "Pet",
-    description: "Dog wrapped in a plaid blanket",
   },
   {
     src: "/samples/flower.jpg",
