@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { useImageStore } from "@/image/store";
 import {
   DEFAULT_PHYSICAL,
@@ -9,8 +10,8 @@ import type { SolverInitExtras, SolverStatus } from "./types";
 import { getSolverWorker, terminateSolverWorker } from "./worker-client";
 
 const DEFAULT_FACE_EMPHASIS = 1.5;
-
 const BATCH_SIZE = 24;
+const STORAGE_KEY = "string.solver.v1";
 
 interface SolverState {
   status: SolverStatus;
@@ -52,7 +53,10 @@ async function runSolverLoop(get: () => SolverState, generationId: number) {
   }
 }
 
-export const useSolverStore = create<SolverState>((set, get) => ({
+const baseStoreFactory = (
+  set: (partial: Partial<SolverState> | ((prev: SolverState) => Partial<SolverState>)) => void,
+  get: () => SolverState,
+): SolverState => ({
   status: "idle",
   errorMessage: null,
   physical: { ...DEFAULT_PHYSICAL },
@@ -158,4 +162,42 @@ export const useSolverStore = create<SolverState>((set, get) => ({
       lineBudget: 0,
     }));
   },
-}));
+});
+
+export const useSolverStore = create<SolverState>()(
+  persist(baseStoreFactory, {
+    name: STORAGE_KEY,
+    storage: createJSONStorage(() => localStorage, {
+      reviver: (key, value) => {
+        if (key === "pinPositions" && Array.isArray(value)) {
+          return new Float32Array(value as number[]);
+        }
+        if (key === "seed" && typeof value === "string") {
+          return BigInt(value);
+        }
+        return value;
+      },
+      replacer: (_key, value) => {
+        if (value instanceof Float32Array) {
+          return Array.from(value);
+        }
+        if (typeof value === "bigint") {
+          return value.toString();
+        }
+        return value;
+      },
+    }),
+    partialize: (state) => ({
+      status: state.status === "running" ? "cancelled" : state.status,
+      physical: state.physical,
+      seed: state.seed,
+      sequence: state.sequence,
+      pinPositions: state.pinPositions,
+      pinCount: state.pinCount,
+      imageSize: state.imageSize,
+      linesDrawn: state.linesDrawn,
+      lineBudget: state.lineBudget,
+    }),
+    version: 1,
+  }),
+);

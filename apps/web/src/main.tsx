@@ -7,7 +7,11 @@ import { HomePage } from "@/app/pages/home";
 import { BuildPage } from "@/app/pages/build";
 import { AboutPage } from "@/app/pages/about";
 import { NotFoundPage } from "@/app/pages/not-found";
+import { useImageStore } from "@/image/store";
 import "@/styles/globals.css";
+
+// Rehydrate the loom from the blob cache when a reload lands back on the app.
+void useImageStore.getState().rehydrateFromCache();
 
 const rootElement = document.getElementById("root");
 if (!rootElement) {

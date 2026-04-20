@@ -25,9 +25,9 @@ export const THREADS: Record<ThreadId, ThreadSpec> = {
   },
   dmcFloss: {
     id: "dmcFloss",
-    label: "Embroidery floss (2-strand)",
+    label: "Embroidery thread (2-strand)",
     diameterMm: 0.3,
-    description: "Medium weight. A good all-round default.",
+    description: "Medium weight embroidery thread like DMC floss, split to two strands.",
   },
   crochetCotton: {
     id: "crochetCotton",

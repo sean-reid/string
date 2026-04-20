@@ -1,6 +1,7 @@
+import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
-async function primePattern(page: import("@playwright/test").Page) {
+async function primePattern(page: Page) {
   await page.goto("/");
   await page
     .locator("section[aria-label='Sample images'] button")

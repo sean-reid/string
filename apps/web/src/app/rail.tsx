@@ -26,7 +26,7 @@ const BOARD_OPTIONS: Array<{ value: BoardId; label: string }> = [
 
 const THREAD_OPTIONS: Array<{ value: ThreadId; label: string }> = [
   { value: "polyester", label: "Polyester" },
-  { value: "dmcFloss", label: "Floss" },
+  { value: "dmcFloss", label: "Embroidery" },
   { value: "crochetCotton", label: "Cotton #10" },
 ];
 
