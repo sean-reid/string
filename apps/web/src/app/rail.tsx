@@ -2,6 +2,7 @@ import { useEffect, useCallback } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
 import { useViewStore } from "@/solver/view-store";
+import { ExportPanel } from "@/export/export-panel";
 import {
   BOARDS,
   THREADS,
@@ -203,6 +204,10 @@ export function ParameterRail() {
                 {lineBudget.toLocaleString()}
               </p>
             )}
+          </div>
+
+          <div className="mt-2 border-t border-line pt-4">
+            <ExportPanel />
           </div>
         </div>
       )}
