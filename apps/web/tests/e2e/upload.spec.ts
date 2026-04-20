@@ -1,16 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.resolve(__dirname, "../fixtures/test-portrait.jpg");
 const fixtureBase64 = readFileSync(fixture).toString("base64");
 
-async function pushFixtureAs(
-  page: import("@playwright/test").Page,
-  eventName: "drop" | "paste",
-) {
+async function pushFixtureAs(page: Page, eventName: "drop" | "paste") {
   await page.evaluate(
     async ({ b64, kind }) => {
       const res = await fetch(`data:image/jpeg;base64,${b64}`);
@@ -89,6 +87,41 @@ test.describe("upload and decode", () => {
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 15_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
+  });
+
+  test("solver renders a string-art pattern from a sample", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.goto("/");
+    await page.getByRole("button", { name: /Use sample: Portrait/i }).click();
+    const stage = page.getByRole("img", { name: /loom preview/i });
+    await expect(stage).toBeVisible({ timeout: 20_000 });
+
+    // Reduce the workload for CI then trigger a regen.
+    await page.getByLabel("Lines").fill("600");
+    await page.getByLabel("Nails").fill("180");
+    await page.getByRole("button", { name: /Generate/i }).click();
+
+    await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
+
+    // Capture the final canvas image-data hash-like fingerprint so the test
+    // fails loudly on a blank canvas.
+    const sampled = await stage.locator("canvas").evaluate((el) => {
+      const c = el as HTMLCanvasElement;
+      const ctx = c.getContext("2d");
+      if (!ctx) return 0;
+      const data = ctx.getImageData(
+        Math.floor(c.width * 0.4),
+        Math.floor(c.height * 0.4),
+        Math.floor(c.width * 0.2),
+        Math.floor(c.height * 0.2),
+      ).data;
+      let acc = 0;
+      for (let i = 0; i < data.length; i += 40) acc = (acc + data[i]!) & 0xffff;
+      return acc;
+    });
+    expect(sampled).toBeGreaterThan(0);
   });
 
   test("rejects non-image files with a friendly message", async ({ page }) => {
