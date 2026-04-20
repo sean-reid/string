@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useSolverStore } from "@/solver/store";
+import { BOARDS, THREADS, threadCoverage } from "@/solver/physics";
 
 const DISPLAY_CAP = 1024;
-const THREAD_COLOR = "#ffffff";
-const LINE_OPACITY = 0.09;
+const THREAD_COLOR = "#f4efe5";
 const LINE_WIDTH = 0.9;
 
 /**
@@ -16,6 +16,15 @@ export function LinesCanvas() {
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const generationId = useSolverStore((s) => s.generationId);
+  const physical = useSolverStore((s) => s.physical);
+  const coverage = threadCoverage(
+    THREADS[physical.threadId],
+    BOARDS[physical.boardId],
+  );
+  // Source-over compositing: each stroke's alpha blends onto the
+  // current canvas, giving the physical diminishing-returns curve
+  // (brightness = 1 - (1 - alpha)^N after N passes).
+  const lineOpacity = coverage;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawnCountRef = useRef(0);
@@ -60,10 +69,9 @@ export function LinesCanvas() {
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.strokeStyle = THREAD_COLOR;
-    ctx.globalAlpha = LINE_OPACITY;
+    ctx.globalAlpha = lineOpacity;
     ctx.lineWidth = LINE_WIDTH;
     ctx.lineCap = "round";
-    ctx.globalCompositeOperation = "lighter";
 
     ctx.beginPath();
     for (let i = start; i < sequence.length; i++) {
@@ -89,7 +97,7 @@ export function LinesCanvas() {
     ctx.restore();
 
     drawnCountRef.current = sequence.length;
-  }, [sequence, pinPositions, imageSize, generationId]);
+  }, [sequence, pinPositions, imageSize, generationId, lineOpacity]);
 
   return (
     <canvas

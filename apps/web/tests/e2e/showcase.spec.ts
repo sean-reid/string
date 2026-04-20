@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const SAMPLES = ["Face", "Portrait", "Landscape", "Botanical"];
+const SAMPLES = ["Smile", "Portrait", "Headshot", "Lioness"];
 
 for (const label of SAMPLES) {
   test(`render sample: ${label}`, async ({ page }) => {
@@ -11,6 +11,11 @@ for (const label of SAMPLES) {
       .getByRole("button", { name: new RegExp(`Use sample: ${label}`, "i") })
       .click();
     await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 120_000 });
+
+    await page.screenshot({
+      path: `test-results/showcase-${label.toLowerCase()}-rail.png`,
+      fullPage: false,
+    });
 
     const canvas = page.locator("canvas").first();
     await canvas.screenshot({

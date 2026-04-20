@@ -92,7 +92,7 @@ test.describe("upload and decode", () => {
   test("Esc cancels a running solver mid-generate", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Portrait/i }).click();
+    await page.getByRole("button", { name: /Use sample: Smile/i }).click();
     await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible({
       timeout: 20_000,
     });
@@ -105,26 +105,9 @@ test.describe("upload and decode", () => {
   }) => {
     test.setTimeout(90_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Portrait/i }).click();
+    await page.getByRole("button", { name: /Use sample: Smile/i }).click();
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 20_000 });
-
-    // Cancel the auto-run and re-trigger with a shrunken line budget.
-    if (await page.getByRole("button", { name: "Cancel" }).isVisible()) {
-      await page.keyboard.press("Escape");
-    }
-    await expect(page.getByRole("button", { name: /Generate/ })).toBeVisible({
-      timeout: 20_000,
-    });
-
-    const linesSlider = page.getByLabel("Lines");
-    await linesSlider.evaluate((el: HTMLInputElement) => {
-      el.value = "600";
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    await page.getByRole("button", { name: /Generate/ }).click();
 
     await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
 

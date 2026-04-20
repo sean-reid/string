@@ -1,6 +1,6 @@
 import type { SolverParamsJson } from "./types";
 
-export type ThreadId = "polyester" | "dmcFloss" | "crochetCotton" | "yarn";
+export type ThreadId = "polyester" | "dmcFloss" | "crochetCotton";
 export type BoardId = "b12" | "b16" | "b20" | "b24";
 
 export interface ThreadSpec {
@@ -35,12 +35,6 @@ export const THREADS: Record<ThreadId, ThreadSpec> = {
     diameterMm: 0.4,
     description: "Bolder threads. Fewer passes needed per region.",
   },
-  yarn: {
-    id: "yarn",
-    label: "Fine yarn",
-    diameterMm: 0.6,
-    description: "Chunkiest. Best for large boards and simple subjects.",
-  },
 };
 
 export const BOARDS: Record<BoardId, BoardSpec> = {
@@ -64,9 +58,9 @@ export interface PhysicalParams {
 
 export const DEFAULT_PHYSICAL: PhysicalParams = {
   boardId: "b16",
-  threadId: "dmcFloss",
+  threadId: "polyester",
   pinCount: 288,
-  lineBudget: 3000,
+  lineBudget: 1500,
   minChordPct: 0.2,
 };
 

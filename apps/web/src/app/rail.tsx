@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useCallback } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
 import { useViewStore } from "@/solver/view-store";
@@ -27,7 +27,6 @@ const THREAD_OPTIONS: Array<{ value: ThreadId; label: string }> = [
   { value: "polyester", label: "Polyester" },
   { value: "dmcFloss", label: "Floss" },
   { value: "crochetCotton", label: "Cotton #10" },
-  { value: "yarn", label: "Yarn" },
 ];
 
 export function ParameterRail() {
@@ -41,6 +40,14 @@ export function ParameterRail() {
   const cancel = useSolverStore((s) => s.cancel);
   const showSource = useViewStore((s) => s.showSource);
   const toggleSource = useViewStore((s) => s.toggleSource);
+  const resetImage = useImageStore((s) => s.reset);
+  const resetSolver = useSolverStore((s) => s.reset);
+
+  const startOver = useCallback(() => {
+    cancel();
+    resetSolver();
+    resetImage();
+  }, [cancel, resetSolver, resetImage]);
 
   useEffect(() => {
     if (imageStatus !== "ready") return;
@@ -161,6 +168,13 @@ export function ParameterRail() {
                 : solverStatus === "done"
                   ? "Generate again"
                   : "Generate"}
+            </button>
+            <button
+              type="button"
+              onClick={startOver}
+              className="inline-flex h-9 items-center justify-center rounded-md border border-line bg-surface px-4 text-sm text-muted transition hover:border-ink hover:text-ink"
+            >
+              New image
             </button>
             <label className="mt-1 flex items-center justify-between text-sm text-muted">
               <span>Show source</span>

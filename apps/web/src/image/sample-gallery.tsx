@@ -9,24 +9,24 @@ interface Sample {
 
 const SAMPLES: Sample[] = [
   {
-    src: "/samples/face.jpg",
-    label: "Face",
-    description: "Human headshot in soft window light",
+    src: "/samples/face1.jpg",
+    label: "Smile",
+    description: "Woman laughing, strong front light",
+  },
+  {
+    src: "/samples/face2.jpg",
+    label: "Portrait",
+    description: "Man facing camera, sharp features",
+  },
+  {
+    src: "/samples/face3.jpg",
+    label: "Headshot",
+    description: "Woman in striped shirt, soft golden light",
   },
   {
     src: "/samples/portrait.jpg",
-    label: "Portrait",
+    label: "Lioness",
     description: "Lioness at close range, strong eye contact",
-  },
-  {
-    src: "/samples/landscape.jpg",
-    label: "Landscape",
-    description: "Highland ridge with a thread of road",
-  },
-  {
-    src: "/samples/flower.jpg",
-    label: "Botanical",
-    description: "Purple petunias in low light",
   },
 ];
 
