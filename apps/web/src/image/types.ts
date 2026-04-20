@@ -1,5 +1,12 @@
 export type ImageStatus = "idle" | "decoding" | "ready" | "error";
 
+export interface FaceBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ImageMetadata {
   /** Source hash (sha-256, hex) used as a cache key and share-link fragment. */
   hash: string;
@@ -16,6 +23,10 @@ export interface ImageMetadata {
   filename?: string;
   /** Bytes of the source blob. */
   byteLength: number;
+  /** Detected face region in solver-image coordinates (may be an estimate). */
+  faceBox?: FaceBox;
+  /** True when the face region was detected by a real model, false if estimated. */
+  faceDetected: boolean;
 }
 
 export interface DecodedImage {

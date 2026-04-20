@@ -5,8 +5,10 @@ import {
   type PhysicalParams,
   deriveSolverParams,
 } from "./physics";
-import type { SolverStatus } from "./types";
+import type { SolverInitExtras, SolverStatus } from "./types";
 import { getSolverWorker, terminateSolverWorker } from "./worker-client";
+
+const DEFAULT_FACE_EMPHASIS = 1.5;
 
 const BATCH_SIZE = 24;
 
@@ -105,7 +107,21 @@ export const useSolverStore = create<SolverState>((set, get) => ({
 
       const raw = deriveSolverParams(get().physical);
       const remote = getSolverWorker();
-      const init = await remote.init(rgba, image.meta.size, raw, get().seed);
+      const face = image.meta.faceBox;
+      const extras: SolverInitExtras = {
+        faceX: face?.x ?? 0,
+        faceY: face?.y ?? 0,
+        faceW: face?.w ?? 0,
+        faceH: face?.h ?? 0,
+        faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
+      };
+      const init = await remote.init(
+        rgba,
+        image.meta.size,
+        raw,
+        get().seed,
+        extras,
+      );
       if (get().generationId !== generationId) return;
       set({
         pinPositions: init.pinPositions,

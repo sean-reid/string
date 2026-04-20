@@ -7,12 +7,14 @@
 //!   3. `is_done()` flips true when the line budget is reached.
 
 pub mod chord;
+pub mod weight;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::VecDeque;
 
-use self::chord::{draw_chord, score_chord, Endpoints};
+use self::chord::{draw_chord, Endpoints};
+use self::weight::{with_face_emphasis, FaceBox};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SolverConfig {
@@ -45,6 +47,7 @@ pub struct Solver {
     pins_x: Vec<f32>,
     pins_y: Vec<f32>,
     residual: Vec<f32>,
+    weights: Vec<f32>,
     config: SolverConfig,
     rng: ChaCha8Rng,
     current: u16,
@@ -58,6 +61,8 @@ impl Solver {
         size: usize,
         config: SolverConfig,
         seed: u64,
+        face: Option<FaceBox>,
+        face_emphasis: f32,
     ) -> Result<Self, &'static str> {
         if preprocessed_rgba.len() != size * size * 4 {
             return Err("preprocessed buffer size does not match width*height*4");
@@ -76,6 +81,7 @@ impl Solver {
         }
 
         let (pins_x, pins_y) = uniform_pins(size, config.pin_count as usize);
+        let weights = with_face_emphasis(size, face, face_emphasis.max(0.0), 1.2);
 
         Ok(Self {
             width: size,
@@ -83,6 +89,7 @@ impl Solver {
             pins_x,
             pins_y,
             residual,
+            weights,
             config,
             rng: ChaCha8Rng::seed_from_u64(seed),
             current: 0,
@@ -144,7 +151,16 @@ impl Solver {
                 continue;
             }
             let (qx, qy) = self.pin_position(i);
-            let s = score_chord(&self.residual, self.width, self.height, cx, cy, qx, qy);
+            let s = score_chord_weighted(
+                &self.residual,
+                &self.weights,
+                self.width,
+                self.height,
+                cx,
+                cy,
+                qx,
+                qy,
+            );
             candidates.push(i);
             scores.push(s);
             if s > best {
@@ -220,6 +236,32 @@ impl Solver {
     }
 }
 
+/// Score a chord weighted per-pixel by an importance map. Falls back to the
+/// unweighted score_chord signature semantics when all weights are 1.
+fn score_chord_weighted(
+    residual: &[f32],
+    weights: &[f32],
+    width: usize,
+    height: usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) -> f32 {
+    let mut sum = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    chord::for_each_pixel(x0, y0, x1, y1, width, height, |idx, c| {
+        let w = weights[idx];
+        sum += residual[idx] * c * w;
+        weight_sum += c * w;
+    });
+    if weight_sum > 0.0 {
+        sum / weight_sum
+    } else {
+        0.0
+    }
+}
+
 fn uniform_pins(size: usize, pin_count: usize) -> (Vec<f32>, Vec<f32>) {
     let cx = (size as f32 - 1.0) * 0.5;
     let cy = (size as f32 - 1.0) * 0.5;
@@ -276,7 +318,7 @@ mod tests {
             line_budget: 50,
             ..Default::default()
         };
-        let mut solver = Solver::new(&rgba, size, config, 42).expect("solver init");
+        let mut solver = Solver::new(&rgba, size, config, 42, None, 0.0).expect("solver init");
         let mut drawn = 0u32;
         while !solver.is_done() {
             let batch = solver.step_many(10);
@@ -299,7 +341,7 @@ mod tests {
             ..Default::default()
         };
         let run = |seed: u64| -> Vec<u16> {
-            let mut s = Solver::new(&rgba, size, config, seed).unwrap();
+            let mut s = Solver::new(&rgba, size, config, seed, None, 0.0).unwrap();
             let mut pins = Vec::new();
             while !s.is_done() {
                 pins.extend(s.step_many(30));

@@ -4,6 +4,7 @@ import { getSolver } from "@/solver/wasm";
 import type {
   BatchResult,
   InitResult,
+  SolverInitExtras,
   SolverParamsJson,
   SolverWorkerApi,
 } from "@/solver/types";
@@ -27,6 +28,7 @@ const api: SolverWorkerApi = {
     size: number,
     params: SolverParamsJson,
     seed: bigint,
+    extras: SolverInitExtras,
   ): Promise<InitResult> {
     const solver = await getSolver();
     instance?.free();
@@ -41,7 +43,17 @@ const api: SolverWorkerApi = {
     wasmParams.temperature_start = params.temperature_start;
     wasmParams.temperature_end = params.temperature_end;
 
-    instance = new solver.Solver(rgba, size, wasmParams, seed);
+    instance = new solver.Solver(
+      rgba,
+      size,
+      wasmParams,
+      seed,
+      extras.faceX,
+      extras.faceY,
+      extras.faceW,
+      extras.faceH,
+      extras.faceEmphasis,
+    );
 
     const pinPositions = instance.pinPositions();
     const copy = new Float32Array(pinPositions.length);

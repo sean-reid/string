@@ -2,10 +2,62 @@
 import * as Comlink from "comlink";
 import type {
   DecodedImage,
+  FaceBox,
   ImageMetadata,
   ImageWorkerApi,
 } from "@/image/types";
 import { getSolver } from "@/solver/wasm";
+
+interface FaceDetectorResult {
+  boundingBox: DOMRectReadOnly;
+}
+interface FaceDetectorCtor {
+  new (options?: { fastMode?: boolean; maxDetectedFaces?: number }): {
+    detect(
+      source: ImageBitmap | OffscreenCanvas,
+    ): Promise<FaceDetectorResult[]>;
+  };
+}
+declare const FaceDetector: FaceDetectorCtor | undefined;
+
+async function detectFace(
+  source: OffscreenCanvas,
+  size: number,
+): Promise<{ box: FaceBox | undefined; detected: boolean }> {
+  if (typeof FaceDetector === "undefined") {
+    return {
+      box: estimatedCenterBox(size),
+      detected: false,
+    };
+  }
+  try {
+    const detector = new FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+    const faces = await detector.detect(source);
+    const face = faces[0];
+    if (!face) {
+      return { box: estimatedCenterBox(size), detected: false };
+    }
+    const b = face.boundingBox;
+    return {
+      box: { x: b.x, y: b.y, w: b.width, h: b.height },
+      detected: true,
+    };
+  } catch {
+    return { box: estimatedCenterBox(size), detected: false };
+  }
+}
+
+function estimatedCenterBox(size: number): FaceBox {
+  // Samples are square-cropped portraits; assume a centered face occupying
+  // ~55% of the frame as a reasonable prior when detection is unavailable.
+  const side = size * 0.55;
+  return {
+    x: (size - side) * 0.5,
+    y: (size - side) * 0.45,
+    w: side,
+    h: side,
+  };
+}
 
 const HEIC_MIMES = new Set(["image/heic", "image/heif"]);
 
@@ -128,6 +180,12 @@ const api: ImageWorkerApi = {
 
     const cropCtx = cropCanvas.getContext("2d");
     if (!cropCtx) throw new Error("2D context unavailable on crop canvas");
+
+    // Run face detection on the color square-crop before preprocessing; the
+    // detector works better on color and the coordinates match the solver
+    // image size 1-for-1.
+    const faceResult = await detectFace(cropCanvas, size);
+
     const rgba = cropCtx.getImageData(0, 0, size, size);
 
     const solver = await getSolver();
@@ -153,6 +211,8 @@ const api: ImageWorkerApi = {
       mime: blob.type || "application/octet-stream",
       filename: opts.filename,
       byteLength: blob.size,
+      faceBox: faceResult.box,
+      faceDetected: faceResult.detected,
     };
 
     const result: DecodedImage = { bitmap, meta };

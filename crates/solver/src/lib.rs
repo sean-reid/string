@@ -4,7 +4,7 @@ pub mod preprocess;
 pub mod solver;
 
 use preprocess::Params;
-use solver::{Solver as GreedySolver, SolverConfig};
+use solver::{Solver as GreedySolver, SolverConfig, weight::FaceBox};
 
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
@@ -144,9 +144,31 @@ impl Solver {
         size: u32,
         params: SolverParams,
         seed: u64,
+        face_x: f32,
+        face_y: f32,
+        face_w: f32,
+        face_h: f32,
+        face_emphasis: f32,
     ) -> Result<Solver, JsValue> {
-        let inner = GreedySolver::new(preprocessed_rgba, size as usize, params.into(), seed)
-            .map_err(JsValue::from_str)?;
+        let face = if face_w > 0.0 && face_h > 0.0 {
+            Some(FaceBox {
+                x: face_x,
+                y: face_y,
+                w: face_w,
+                h: face_h,
+            })
+        } else {
+            None
+        };
+        let inner = GreedySolver::new(
+            preprocessed_rgba,
+            size as usize,
+            params.into(),
+            seed,
+            face,
+            face_emphasis,
+        )
+        .map_err(JsValue::from_str)?;
         Ok(Solver { inner, size })
     }
 

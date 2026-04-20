@@ -24,12 +24,21 @@ export interface BatchResult {
   done: boolean;
 }
 
+export interface SolverInitExtras {
+  faceX: number;
+  faceY: number;
+  faceW: number;
+  faceH: number;
+  faceEmphasis: number;
+}
+
 export interface SolverWorkerApi {
   init(
     rgba: Uint8Array,
     size: number,
     params: SolverParamsJson,
     seed: bigint,
+    extras: SolverInitExtras,
   ): Promise<InitResult>;
   step(max: number): Promise<BatchResult>;
   dispose(): Promise<void>;
