@@ -1,4 +1,5 @@
 import { FileDrop } from "@/image/file-drop";
+import { SampleGallery } from "@/image/sample-gallery";
 import { useImageStore } from "@/image/store";
 import { LoomPreview } from "./loom-preview";
 import { ProgressRail } from "./progress-rail";
@@ -23,7 +24,14 @@ export function CanvasStage() {
       ].join(" ")}
     >
       <ProgressRail />
-      {hasImage && meta ? <LoomPreview /> : <FileDrop />}
+      {hasImage && meta ? (
+        <LoomPreview />
+      ) : (
+        <div className="flex w-full flex-col items-center gap-8">
+          <FileDrop />
+          <SampleGallery />
+        </div>
+      )}
     </div>
   );
 }

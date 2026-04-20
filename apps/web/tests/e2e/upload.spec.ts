@@ -30,6 +30,16 @@ test.describe("upload and decode", () => {
     expect(size.h).toBe(size.w);
   });
 
+  test("loading a sample ingests without a file picker", async ({ page }) => {
+    await page.goto("/");
+    await page
+      .getByRole("button", { name: /Use sample: Portrait/i })
+      .click();
+    const stage = page.getByRole("img", { name: /loom preview/i });
+    await expect(stage).toBeVisible({ timeout: 15_000 });
+    await expect(stage).toHaveAttribute("data-state", "ready");
+  });
+
   test("rejects non-image files with a friendly message", async ({ page }) => {
     await page.goto("/");
     const input = page.getByLabel("Choose an image to turn into string art");
