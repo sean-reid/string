@@ -1,0 +1,102 @@
+import { useEffect, useRef } from "react";
+import { useSolverStore } from "@/solver/store";
+
+const DISPLAY_CAP = 1024;
+const THREAD_COLOR = "#ffffff";
+const LINE_OPACITY = 0.09;
+const LINE_WIDTH = 0.9;
+
+/**
+ * Top layer of the loom. Appends new thread lines as the solver emits
+ * batches. The underlay canvas sits behind this one, so Show Source
+ * toggling never forces a repaint of the sequence.
+ */
+export function LinesCanvas() {
+  const sequence = useSolverStore((s) => s.sequence);
+  const pinPositions = useSolverStore((s) => s.pinPositions);
+  const imageSize = useSolverStore((s) => s.imageSize);
+  const generationId = useSolverStore((s) => s.generationId);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawnCountRef = useRef(0);
+  const lastGenRef = useRef(-1);
+  const displaySizeRef = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const parent = canvas.parentElement;
+    const size = Math.min(
+      parent?.clientWidth ?? DISPLAY_CAP,
+      parent?.clientHeight ?? DISPLAY_CAP,
+      DISPLAY_CAP,
+    );
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // Reset when the generation changes (new image or new solver run).
+    if (lastGenRef.current !== generationId) {
+      canvas.width = size * dpr;
+      canvas.height = size * dpr;
+      canvas.style.width = `${size}px`;
+      canvas.style.height = `${size}px`;
+      const ctx = canvas.getContext("2d");
+      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      drawnCountRef.current = 0;
+      lastGenRef.current = generationId;
+      displaySizeRef.current = size;
+    } else if (displaySizeRef.current === 0) {
+      displaySizeRef.current = size;
+    }
+
+    if (!pinPositions || imageSize <= 0 || sequence.length < 2) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const scale = displaySizeRef.current / imageSize;
+    const start = Math.max(1, drawnCountRef.current);
+    if (start >= sequence.length) return;
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.strokeStyle = THREAD_COLOR;
+    ctx.globalAlpha = LINE_OPACITY;
+    ctx.lineWidth = LINE_WIDTH;
+    ctx.lineCap = "round";
+    ctx.globalCompositeOperation = "lighter";
+
+    ctx.beginPath();
+    for (let i = start; i < sequence.length; i++) {
+      const fromIdx = sequence[i - 1];
+      const toIdx = sequence[i];
+      if (fromIdx === undefined || toIdx === undefined) continue;
+      const fx = pinPositions[fromIdx * 2];
+      const fy = pinPositions[fromIdx * 2 + 1];
+      const tx = pinPositions[toIdx * 2];
+      const ty = pinPositions[toIdx * 2 + 1];
+      if (
+        fx === undefined ||
+        fy === undefined ||
+        tx === undefined ||
+        ty === undefined
+      ) {
+        continue;
+      }
+      ctx.moveTo(fx * scale, fy * scale);
+      ctx.lineTo(tx * scale, ty * scale);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    drawnCountRef.current = sequence.length;
+  }, [sequence, pinPositions, imageSize, generationId]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      role="presentation"
+      aria-hidden="true"
+      className="absolute inset-0 m-auto block"
+    />
+  );
+}
