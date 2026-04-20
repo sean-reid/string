@@ -97,8 +97,18 @@ test.describe("upload and decode", () => {
       .locator("section[aria-label='Sample images'] button")
       .first()
       .click();
+    // Wait for the initial auto-run to finish, then crank the line budget and
+    // kick off a longer generation we can actually interrupt.
+    await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
+    const linesSlider = page.getByLabel("Lines");
+    await linesSlider.evaluate((el: HTMLInputElement) => {
+      el.value = "6000";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await page.getByRole("button", { name: /Generate again/ }).click();
     await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible({
-      timeout: 20_000,
+      timeout: 10_000,
     });
     await page.keyboard.press("Escape");
     await expect(page.getByText(/stopped at/)).toBeVisible({ timeout: 10_000 });
