@@ -92,7 +92,7 @@ test.describe("upload and decode", () => {
   test("Esc cancels a running solver mid-generate", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Smile/i }).click();
+    await page.getByRole("button", { name: /Use sample: Close-up/i }).click();
     await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible({
       timeout: 20_000,
     });
@@ -105,7 +105,7 @@ test.describe("upload and decode", () => {
   }) => {
     test.setTimeout(90_000);
     await page.goto("/");
-    await page.getByRole("button", { name: /Use sample: Smile/i }).click();
+    await page.getByRole("button", { name: /Use sample: Close-up/i }).click();
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 20_000 });
 

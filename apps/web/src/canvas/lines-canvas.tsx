@@ -5,6 +5,11 @@ import { BOARDS, THREADS, threadCoverage } from "@/solver/physics";
 const DISPLAY_CAP = 1024;
 const THREAD_COLOR = "#f4efe5";
 const LINE_WIDTH = 0.9;
+// Each stroke() call composites as one shape, so overlaps within a batch
+// don't stack. Multiple batches composite over each other, giving the
+// diminishing-returns curve we want. Keeping batches small keeps the
+// remount-repaint visually identical to the live generation.
+const STROKE_BATCH = 16;
 
 /**
  * Top layer of the loom. Appends new thread lines as the solver emits
@@ -73,6 +78,7 @@ export function LinesCanvas() {
     ctx.lineWidth = LINE_WIDTH;
     ctx.lineCap = "round";
 
+    let batchSize = 0;
     ctx.beginPath();
     for (let i = start; i < sequence.length; i++) {
       const fromIdx = sequence[i - 1];
@@ -92,8 +98,14 @@ export function LinesCanvas() {
       }
       ctx.moveTo(fx * scale, fy * scale);
       ctx.lineTo(tx * scale, ty * scale);
+      batchSize++;
+      if (batchSize >= STROKE_BATCH) {
+        ctx.stroke();
+        ctx.beginPath();
+        batchSize = 0;
+      }
     }
-    ctx.stroke();
+    if (batchSize > 0) ctx.stroke();
     ctx.restore();
 
     drawnCountRef.current = sequence.length;

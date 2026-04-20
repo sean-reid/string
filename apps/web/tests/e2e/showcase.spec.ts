@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const SAMPLES = ["Smile", "Portrait", "Headshot", "Lioness"];
+const SAMPLES = ["Close-up", "Portrait", "Headshot", "Lioness"];
 
 for (const label of SAMPLES) {
   test(`render sample: ${label}`, async ({ page }) => {

@@ -10,8 +10,8 @@ interface Sample {
 const SAMPLES: Sample[] = [
   {
     src: "/samples/face1.jpg",
-    label: "Smile",
-    description: "Woman laughing, strong front light",
+    label: "Close-up",
+    description: "Woman facing camera, freckles, neutral expression",
   },
   {
     src: "/samples/face2.jpg",
