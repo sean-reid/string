@@ -51,7 +51,7 @@ test.describe("upload and decode", () => {
     await expect(stage).toBeVisible({ timeout: 10_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
 
-    const canvas = stage.locator("canvas");
+    const canvas = stage.locator("canvas").first();
     await expect(canvas).toBeVisible();
     const size = await canvas.evaluate((el: HTMLCanvasElement) => ({
       w: el.width,
@@ -89,6 +89,17 @@ test.describe("upload and decode", () => {
     await expect(stage).toHaveAttribute("data-state", "ready");
   });
 
+  test("Esc cancels a running solver mid-generate", async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.goto("/");
+    await page.getByRole("button", { name: /Use sample: Portrait/i }).click();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible({
+      timeout: 20_000,
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.getByText(/stopped at/)).toBeVisible({ timeout: 10_000 });
+  });
+
   test("solver renders a string-art pattern from a sample", async ({
     page,
   }) => {
@@ -98,16 +109,28 @@ test.describe("upload and decode", () => {
     const stage = page.getByRole("img", { name: /loom preview/i });
     await expect(stage).toBeVisible({ timeout: 20_000 });
 
-    // Reduce the workload for CI then trigger a regen.
-    await page.getByLabel("Lines").fill("600");
-    await page.getByLabel("Nails").fill("180");
-    await page.getByRole("button", { name: /Generate/i }).click();
+    // Cancel the auto-run and re-trigger with a shrunken line budget.
+    if (await page.getByRole("button", { name: "Cancel" }).isVisible()) {
+      await page.keyboard.press("Escape");
+    }
+    await expect(page.getByRole("button", { name: /Generate/ })).toBeVisible({
+      timeout: 20_000,
+    });
+
+    const linesSlider = page.getByLabel("Lines");
+    await linesSlider.evaluate((el: HTMLInputElement) => {
+      el.value = "600";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await page.getByRole("button", { name: /Generate/ }).click();
 
     await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
 
     // Capture the final canvas image-data hash-like fingerprint so the test
     // fails loudly on a blank canvas.
-    const sampled = await stage.locator("canvas").evaluate((el) => {
+    const sampled = await stage.locator("canvas").nth(1).evaluate((el) => {
       const c = el as HTMLCanvasElement;
       const ctx = c.getContext("2d");
       if (!ctx) return 0;
