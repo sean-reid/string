@@ -1,8 +1,10 @@
 use wasm_bindgen::prelude::*;
 
 pub mod preprocess;
+pub mod solver;
 
 use preprocess::Params;
+use solver::{Solver as GreedySolver, SolverConfig};
 
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
@@ -76,6 +78,124 @@ impl From<PreprocessParams> for Params {
 #[wasm_bindgen]
 pub fn preprocess(rgba: &[u8], width: u32, height: u32, params: PreprocessParams) -> Box<[u8]> {
     preprocess::run(rgba, width as usize, height as usize, params.into()).into_boxed_slice()
+}
+
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub struct SolverParams {
+    pub pin_count: u32,
+    pub line_budget: u32,
+    pub opacity: f32,
+    pub min_chord_skip: u32,
+    pub ban_window: u32,
+    pub temperature_start: f32,
+    pub temperature_end: f32,
+}
+
+#[wasm_bindgen]
+impl SolverParams {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> SolverParams {
+        let d = SolverConfig::default();
+        SolverParams {
+            pin_count: d.pin_count as u32,
+            line_budget: d.line_budget,
+            opacity: d.opacity,
+            min_chord_skip: d.min_chord_skip as u32,
+            ban_window: d.ban_window as u32,
+            temperature_start: d.temperature_start,
+            temperature_end: d.temperature_end,
+        }
+    }
+}
+
+impl Default for SolverParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<SolverParams> for SolverConfig {
+    fn from(p: SolverParams) -> Self {
+        SolverConfig {
+            pin_count: p.pin_count.min(u16::MAX as u32) as u16,
+            line_budget: p.line_budget,
+            opacity: p.opacity,
+            min_chord_skip: p.min_chord_skip.min(u16::MAX as u32) as u16,
+            ban_window: p.ban_window.min(u16::MAX as u32) as u16,
+            temperature_start: p.temperature_start,
+            temperature_end: p.temperature_end,
+        }
+    }
+}
+
+/// Streaming string-art solver exposed to JS.
+#[wasm_bindgen]
+pub struct Solver {
+    inner: GreedySolver,
+    size: u32,
+}
+
+#[wasm_bindgen]
+impl Solver {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        preprocessed_rgba: &[u8],
+        size: u32,
+        params: SolverParams,
+        seed: u64,
+    ) -> Result<Solver, JsValue> {
+        let inner = GreedySolver::new(preprocessed_rgba, size as usize, params.into(), seed)
+            .map_err(JsValue::from_str)?;
+        Ok(Solver { inner, size })
+    }
+
+    /// Advance up to `max` lines. Returns the pin indices reached, in order.
+    /// Empty result indicates the solver has finished.
+    #[wasm_bindgen(js_name = stepMany)]
+    pub fn step_many(&mut self, max: u32) -> Vec<u16> {
+        self.inner.step_many(max)
+    }
+
+    #[wasm_bindgen(js_name = isDone)]
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
+    }
+
+    #[wasm_bindgen(js_name = linesDrawn)]
+    pub fn lines_drawn(&self) -> u32 {
+        self.inner.lines_drawn()
+    }
+
+    #[wasm_bindgen(js_name = lineBudget)]
+    pub fn line_budget(&self) -> u32 {
+        self.inner.line_budget()
+    }
+
+    #[wasm_bindgen(js_name = pinCount)]
+    pub fn pin_count(&self) -> u16 {
+        self.inner.pin_count()
+    }
+
+    /// Returns a flat [x0, y0, x1, y1, ...] array of pin positions in image
+    /// coordinates (origin top-left, same resolution as the input buffer).
+    #[wasm_bindgen(js_name = pinPositions)]
+    pub fn pin_positions(&self) -> Vec<f32> {
+        let n = self.inner.pin_count() as usize;
+        let mut out = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let (x, y) = self.inner.pin_position(i as u16);
+            out.push(x);
+            out.push(y);
+        }
+        out
+    }
+
+    /// Convenience: the image side length (same as constructor `size`).
+    #[wasm_bindgen(js_name = imageSize)]
+    pub fn image_size(&self) -> u32 {
+        self.size
+    }
 }
 
 #[cfg(test)]
