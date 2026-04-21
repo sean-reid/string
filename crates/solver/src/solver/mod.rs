@@ -156,10 +156,8 @@ impl Solver {
                 &self.weights,
                 self.width,
                 self.height,
-                cx,
-                cy,
-                qx,
-                qy,
+                (cx, cy),
+                (qx, qy),
             );
             candidates.push(i);
             scores.push(s);
@@ -243,14 +241,12 @@ fn score_chord_weighted(
     weights: &[f32],
     width: usize,
     height: usize,
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
+    p0: (f32, f32),
+    p1: (f32, f32),
 ) -> f32 {
     let mut sum = 0.0f32;
     let mut weight_sum = 0.0f32;
-    chord::for_each_pixel(x0, y0, x1, y1, width, height, |idx, c| {
+    chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, width, height, |idx, c| {
         let w = weights[idx];
         sum += residual[idx] * c * w;
         weight_sum += c * w;
