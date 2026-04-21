@@ -58,7 +58,12 @@ test.describe("exports", () => {
   test("copy puts the nail sequence on the clipboard", async ({
     page,
     context,
+    browserName,
   }) => {
+    test.skip(
+      browserName === "webkit",
+      "Playwright's WebKit driver rejects clipboard permission names; covered by chromium.",
+    );
     test.setTimeout(90_000);
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await primePattern(page);
