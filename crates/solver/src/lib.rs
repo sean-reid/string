@@ -4,7 +4,7 @@ pub mod preprocess;
 pub mod solver;
 
 use preprocess::Params;
-use solver::{Solver as GreedySolver, SolverConfig, weight::FaceBox};
+use solver::{weight::FaceBox, Solver as GreedySolver, SolverConfig};
 
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
@@ -90,6 +90,12 @@ pub struct SolverParams {
     pub ban_window: u32,
     pub temperature_start: f32,
     pub temperature_end: f32,
+    /// Face region in image coordinates. Zero width/height disables face bias.
+    pub face_x: f32,
+    pub face_y: f32,
+    pub face_w: f32,
+    pub face_h: f32,
+    pub face_emphasis: f32,
 }
 
 #[wasm_bindgen]
@@ -105,6 +111,11 @@ impl SolverParams {
             ban_window: d.ban_window as u32,
             temperature_start: d.temperature_start,
             temperature_end: d.temperature_end,
+            face_x: 0.0,
+            face_y: 0.0,
+            face_w: 0.0,
+            face_h: 0.0,
+            face_emphasis: 0.0,
         }
     }
 }
@@ -144,18 +155,13 @@ impl Solver {
         size: u32,
         params: SolverParams,
         seed: u64,
-        face_x: f32,
-        face_y: f32,
-        face_w: f32,
-        face_h: f32,
-        face_emphasis: f32,
     ) -> Result<Solver, JsValue> {
-        let face = if face_w > 0.0 && face_h > 0.0 {
+        let face = if params.face_w > 0.0 && params.face_h > 0.0 {
             Some(FaceBox {
-                x: face_x,
-                y: face_y,
-                w: face_w,
-                h: face_h,
+                x: params.face_x,
+                y: params.face_y,
+                w: params.face_w,
+                h: params.face_h,
             })
         } else {
             None
@@ -166,7 +172,7 @@ impl Solver {
             params.into(),
             seed,
             face,
-            face_emphasis,
+            params.face_emphasis,
         )
         .map_err(JsValue::from_str)?;
         Ok(Solver { inner, size })

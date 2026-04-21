@@ -42,18 +42,13 @@ const api: SolverWorkerApi = {
     wasmParams.ban_window = params.ban_window;
     wasmParams.temperature_start = params.temperature_start;
     wasmParams.temperature_end = params.temperature_end;
+    wasmParams.face_x = extras.faceX;
+    wasmParams.face_y = extras.faceY;
+    wasmParams.face_w = extras.faceW;
+    wasmParams.face_h = extras.faceH;
+    wasmParams.face_emphasis = extras.faceEmphasis;
 
-    instance = new solver.Solver(
-      rgba,
-      size,
-      wasmParams,
-      seed,
-      extras.faceX,
-      extras.faceY,
-      extras.faceW,
-      extras.faceH,
-      extras.faceEmphasis,
-    );
+    instance = new solver.Solver(rgba, size, wasmParams, seed);
 
     const pinPositions = instance.pinPositions();
     const copy = new Float32Array(pinPositions.length);
