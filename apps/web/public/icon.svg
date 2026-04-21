@@ -1,13 +1,107 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <circle cx="32" cy="32" r="28" fill="#FAF8F4" stroke="#141311" stroke-width="2"/>
-  <g stroke="#141311" stroke-width="0.6" fill="none" opacity="0.7">
-    <path d="M10 32 L54 32"/>
-    <path d="M32 10 L32 54"/>
-    <path d="M16 16 L48 48"/>
-    <path d="M48 16 L16 48"/>
-    <path d="M10 20 L54 44"/>
-    <path d="M10 44 L54 20"/>
-    <path d="M20 10 L44 54"/>
-    <path d="M44 10 L20 54"/>
+  <defs>
+    <radialGradient id="d" cx="48%" cy="42%" r="68%">
+      <stop offset="0%" stop-color="#1c1a17"/>
+      <stop offset="100%" stop-color="#0a0908"/>
+    </radialGradient>
+    <clipPath id="c">
+      <circle cx="32" cy="32" r="30"/>
+    </clipPath>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#d)"/>
+  <g clip-path="url(#c)" stroke="#F4EFE5" stroke-linecap="round" stroke-width="0.4" stroke-opacity="0.6" fill="none">
+    <line x1="32.00" y1="3.50" x2="43.59" y2="58.04"/>
+    <line x1="43.59" y1="58.04" x2="4.89" y2="23.19"/>
+    <line x1="4.89" y1="23.19" x2="60.34" y2="34.98"/>
+    <line x1="60.34" y1="34.98" x2="3.66" y2="34.98"/>
+    <line x1="3.66" y1="34.98" x2="32.00" y2="60.50"/>
+    <line x1="32.00" y1="60.50" x2="59.11" y2="23.19"/>
+    <line x1="59.11" y1="23.19" x2="4.89" y2="40.81"/>
+    <line x1="4.89" y1="40.81" x2="60.34" y2="34.98"/>
+    <line x1="60.34" y1="34.98" x2="4.89" y2="23.19"/>
+    <line x1="4.89" y1="23.19" x2="53.18" y2="51.07"/>
+    <line x1="53.18" y1="51.07" x2="4.89" y2="23.19"/>
+    <line x1="4.89" y1="23.19" x2="60.34" y2="34.98"/>
+    <line x1="60.34" y1="34.98" x2="7.32" y2="17.75"/>
+    <line x1="7.32" y1="17.75" x2="56.68" y2="46.25"/>
+    <line x1="56.68" y1="46.25" x2="7.32" y2="17.75"/>
+    <line x1="7.32" y1="17.75" x2="7.32" y2="46.25"/>
+    <line x1="7.32" y1="46.25" x2="60.34" y2="29.02"/>
+    <line x1="60.34" y1="29.02" x2="15.25" y2="55.06"/>
+    <line x1="15.25" y1="55.06" x2="43.59" y2="5.96"/>
+    <line x1="43.59" y1="5.96" x2="10.82" y2="51.07"/>
+    <line x1="10.82" y1="51.07" x2="53.18" y2="12.93"/>
+    <line x1="53.18" y1="12.93" x2="3.66" y2="29.02"/>
+    <line x1="3.66" y1="29.02" x2="59.11" y2="23.19"/>
+    <line x1="59.11" y1="23.19" x2="4.89" y2="40.81"/>
+    <line x1="4.89" y1="40.81" x2="60.34" y2="34.98"/>
+    <line x1="60.34" y1="34.98" x2="37.93" y2="4.12"/>
+    <line x1="37.93" y1="4.12" x2="15.25" y2="55.06"/>
+    <line x1="15.25" y1="55.06" x2="59.11" y2="40.81"/>
+    <line x1="59.11" y1="40.81" x2="43.59" y2="5.96"/>
+    <line x1="43.59" y1="5.96" x2="53.18" y2="51.07"/>
+    <line x1="53.18" y1="51.07" x2="26.07" y2="59.88"/>
+    <line x1="26.07" y1="59.88" x2="4.89" y2="40.81"/>
+    <line x1="4.89" y1="40.81" x2="48.75" y2="55.06"/>
+    <line x1="48.75" y1="55.06" x2="37.93" y2="4.12"/>
+    <line x1="37.93" y1="4.12" x2="3.66" y2="34.98"/>
+    <line x1="3.66" y1="34.98" x2="59.11" y2="40.81"/>
+    <line x1="59.11" y1="40.81" x2="3.66" y2="34.98"/>
+    <line x1="3.66" y1="34.98" x2="56.68" y2="17.75"/>
+    <line x1="56.68" y1="17.75" x2="3.66" y2="34.98"/>
+    <line x1="3.66" y1="34.98" x2="43.59" y2="58.04"/>
+    <line x1="43.59" y1="58.04" x2="10.82" y2="12.93"/>
+    <line x1="10.82" y1="12.93" x2="60.34" y2="29.02"/>
+    <line x1="60.34" y1="29.02" x2="15.25" y2="55.06"/>
+    <line x1="15.25" y1="55.06" x2="15.25" y2="8.94"/>
+    <line x1="15.25" y1="8.94" x2="56.68" y2="46.25"/>
+    <line x1="56.68" y1="46.25" x2="3.66" y2="29.02"/>
+    <line x1="3.66" y1="29.02" x2="26.07" y2="59.88"/>
+    <line x1="26.07" y1="59.88" x2="60.34" y2="29.02"/>
+    <line x1="60.34" y1="29.02" x2="4.89" y2="23.19"/>
+    <line x1="4.89" y1="23.19" x2="48.75" y2="8.94"/>
+    <line x1="48.75" y1="8.94" x2="7.32" y2="46.25"/>
+    <line x1="7.32" y1="46.25" x2="59.11" y2="23.19"/>
+    <line x1="59.11" y1="23.19" x2="7.32" y2="17.75"/>
+    <line x1="7.32" y1="17.75" x2="48.75" y2="55.06"/>
+    <line x1="48.75" y1="55.06" x2="37.93" y2="4.12"/>
+    <line x1="37.93" y1="4.12" x2="3.66" y2="34.98"/>
+    <line x1="3.66" y1="34.98" x2="59.11" y2="23.19"/>
+    <line x1="59.11" y1="23.19" x2="15.25" y2="8.94"/>
+    <line x1="15.25" y1="8.94" x2="56.68" y2="46.25"/>
+    <line x1="56.68" y1="46.25" x2="15.25" y2="8.94"/>
   </g>
+  <g clip-path="url(#c)">
+    <circle cx="32.00" cy="3.50" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="37.93" cy="4.12" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="43.59" cy="5.96" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="48.75" cy="8.94" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="53.18" cy="12.93" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="56.68" cy="17.75" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="59.11" cy="23.19" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="60.34" cy="29.02" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="60.34" cy="34.98" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="59.11" cy="40.81" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="56.68" cy="46.25" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="53.18" cy="51.07" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="48.75" cy="55.06" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="43.59" cy="58.04" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="37.93" cy="59.88" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="32.00" cy="60.50" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="26.07" cy="59.88" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="20.41" cy="58.04" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="15.25" cy="55.06" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="10.82" cy="51.07" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="7.32" cy="46.25" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="4.89" cy="40.81" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="3.66" cy="34.98" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="3.66" cy="29.02" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="4.89" cy="23.19" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="7.32" cy="17.75" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="10.82" cy="12.93" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="15.25" cy="8.94" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="20.41" cy="5.96" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+    <circle cx="26.07" cy="4.12" r="0.7" fill="#F4EFE5" fill-opacity="0.55"/>
+  </g>
+  <circle cx="32" cy="32" r="29.5" fill="none" stroke="#141311" stroke-width="1"/>
 </svg>
