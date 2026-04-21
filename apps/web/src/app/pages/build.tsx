@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { useAutoPlay } from "@/build/auto-play";
-import { computeBom } from "@/build/compute";
-import { Instructions } from "@/build/instructions";
-import { LoomSvg } from "@/build/loom-svg";
-import { MaterialsList } from "@/build/materials";
-import { Printables } from "@/build/printables";
-import { useProgressStore } from "@/build/progress-store";
-import { SideDrawers } from "@/build/side-drawers";
-import { StepDisplay } from "@/build/step-display";
+import { useAutoPlay } from "@/guide/auto-play";
+import { computeBom } from "@/guide/compute";
+import { GuideTabs } from "@/guide/guide-tabs";
+import { Instructions } from "@/guide/instructions";
+import { LoomSvg } from "@/guide/loom-svg";
+import { MaterialsList } from "@/guide/materials";
+import { Printables } from "@/guide/printables";
+import { useProgressStore } from "@/guide/progress-store";
+import { StepDisplay } from "@/guide/step-display";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
 
@@ -54,7 +54,10 @@ export function BuildPage() {
       ) {
         return;
       }
-      if (event.key === " " || event.key === "ArrowRight") {
+      if (event.key === " ") {
+        event.preventDefault();
+        autoPlay.toggle();
+      } else if (event.key === "ArrowRight") {
         event.preventDefault();
         advance();
       } else if (event.key === "ArrowLeft") {
@@ -64,26 +67,24 @@ export function BuildPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [advance, back]);
+  }, [advance, back, autoPlay]);
 
   if (!ready) {
     return (
       <section
         aria-label="Construction guide"
-        className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6"
+        className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-10"
       >
-        <header>
-          <h1 className="font-display text-3xl tracking-tight">
-            Construction guide
-          </h1>
-          <p className="mt-2 text-muted">
+        <header className="flex flex-col gap-2">
+          <h1 className="font-display text-3xl tracking-tight">Build guide</h1>
+          <p className="font-mono text-xs text-muted">
             {status === "running"
               ? "Your pattern is still generating. The guide opens as soon as it finishes."
               : "Generate a pattern first and it appears here."}
           </p>
         </header>
-        <Link to="/" className="text-accent hover:underline">
-          Go to Compose
+        <Link to="/" className="text-sm text-ink hover:text-accent">
+          Go to Compose →
         </Link>
       </section>
     );
@@ -92,25 +93,23 @@ export function BuildPage() {
   return (
     <section
       aria-label="Construction guide"
-      className="mx-auto flex w-full max-w-[1200px] flex-col gap-12 px-10 pb-20 pt-10"
+      className="mx-auto flex w-full max-w-[1180px] flex-col gap-10 px-6 pb-20 pt-8 sm:px-10"
     >
       <header className="flex flex-col gap-2">
-        <h1 className="font-display text-3xl tracking-tight text-ink">
-          Construction guide
+        <h1 className="font-display text-3xl leading-tight tracking-tight">
+          Build guide
         </h1>
-        <p className="font-mono text-[11px] uppercase tracking-[0.24em] text-muted">
-          {physical.pinCount} nails
-          {"      \u00b7      "}
-          {bom.totalThreadMeters.toFixed(0)} m thread
-          {"      \u00b7      "}
-          {bom.threadSpools}{" "}
-          {bom.threadSpools === 1 ? "spool" : "spools"}
+        <p className="font-mono text-xs tabular-nums text-muted">
+          {physical.pinCount.toLocaleString()} nails ·{" "}
+          {bom.totalThreadMeters.toFixed(0)} m thread ·{" "}
+          {bom.threadSpools} {bom.threadSpools === 1 ? "spool" : "spools"} ·{" "}
+          {bom.lineCount.toLocaleString()} lines
         </p>
       </header>
 
-      <div className="grid gap-12 md:grid-cols-[minmax(0,1fr)_380px] md:items-stretch">
-        <div className="flex items-center justify-center">
-          <div className="relative aspect-square w-full max-w-[580px] overflow-hidden rounded-[32px] bg-paper ring-1 ring-line/80 shadow-[0_1px_0_rgba(255,255,255,0.6),0_40px_80px_-50px_rgba(20,19,17,0.2)]">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_400px] md:items-start">
+        <div className="flex items-start justify-center">
+          <div className="aspect-square w-full max-w-[480px]">
             <LoomSvg
               pinPositions={pinPositions}
               imageSize={imageSize}
@@ -129,25 +128,27 @@ export function BuildPage() {
         />
       </div>
 
-      <SideDrawers
-        items={[
-          {
-            id: "materials",
-            label: "Materials",
-            content: (
-              <>
-                <MaterialsList bom={bom} />
-                <Printables />
-              </>
-            ),
-          },
-          {
-            id: "instructions",
-            label: "How to build it",
-            content: <Instructions />,
-          },
-        ]}
-      />
+      <div className="border-t border-line pt-8">
+        <GuideTabs
+          tabs={[
+            {
+              id: "materials",
+              label: "Materials",
+              content: (
+                <div className="flex flex-col gap-10">
+                  <MaterialsList bom={bom} />
+                  <Printables />
+                </div>
+              ),
+            },
+            {
+              id: "instructions",
+              label: "How to build it",
+              content: <Instructions />,
+            },
+          ]}
+        />
+      </div>
     </section>
   );
 }
