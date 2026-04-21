@@ -107,7 +107,7 @@ export function BuildPage() {
         </p>
       </header>
 
-      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_400px] md:items-start">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,480px)_minmax(0,1fr)] md:items-start">
         <div className="flex items-start justify-center">
           <div className="aspect-square w-full max-w-[480px]">
             <LoomSvg
