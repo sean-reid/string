@@ -10,7 +10,7 @@ async function primePattern(page: Page) {
   await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("link", { name: "Build" }).click();
   await expect(
-    page.getByRole("heading", { name: "Construction guide" }),
+    page.getByRole("heading", { name: "Build guide" }),
   ).toBeVisible();
 }
 
@@ -45,43 +45,28 @@ test.describe("build page visual sweep", () => {
     await page.screenshot({ path: "test-results/sweep-desktop-half.png" });
   });
 
-  test("desktop with materials open", async ({ page }) => {
+  test("desktop materials tab", async ({ page }) => {
     test.setTimeout(180_000);
     await page.setViewportSize({ width: 1400, height: 1000 });
     await primePattern(page);
-    await page.getByRole("button", { name: /^Materials/ }).click();
+    const materialsTab = page.getByRole("tab", { name: /^Materials/ });
+    await materialsTab.click();
+    await expect(materialsTab).toHaveAttribute("aria-selected", "true");
     await page.screenshot({ path: "test-results/sweep-desktop-materials.png" });
   });
 
-  test("desktop with instructions open", async ({ page }) => {
+  test("desktop instructions tab", async ({ page }) => {
     test.setTimeout(180_000);
     await page.setViewportSize({ width: 1400, height: 1000 });
     await primePattern(page);
-    await page.getByRole("button", { name: /^How to build it/ }).click();
+    const instructionsTab = page.getByRole("tab", {
+      name: /^How to build it/,
+    });
+    await instructionsTab.click();
+    await expect(instructionsTab).toHaveAttribute("aria-selected", "true");
     await page.screenshot({
       path: "test-results/sweep-desktop-instructions.png",
     });
-  });
-
-  test("desktop with full sequence open", async ({ page }) => {
-    test.setTimeout(180_000);
-    await page.setViewportSize({ width: 1400, height: 1000 });
-    await primePattern(page);
-    await page.getByRole("button", { name: /^Sequence/ }).click();
-    await page.getByRole("button", { name: /Show full list/ }).click();
-    await page.screenshot({ path: "test-results/sweep-desktop-sequence.png" });
-  });
-
-  test("desktop hands-free overlay", async ({ page }) => {
-    test.setTimeout(180_000);
-    await page.setViewportSize({ width: 1400, height: 1000 });
-    await primePattern(page);
-    await advance(page, 50);
-    await page.getByRole("button", { name: /Hands-free/ }).click();
-    await expect(
-      page.getByRole("dialog", { name: "Hands-free build mode" }),
-    ).toBeVisible();
-    await page.screenshot({ path: "test-results/sweep-handsfree.png" });
   });
 
   test("tablet portrait", async ({ page }) => {

@@ -10,74 +10,107 @@ async function primeAndNavigate(page: Page) {
   await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
   await page.getByRole("link", { name: "Build" }).click();
   await expect(
-    page.getByRole("heading", { name: "Construction guide" }),
+    page.getByRole("heading", { name: "Build guide" }),
   ).toBeVisible();
+  await expect(page.getByRole("img", { name: /Loom, step/ })).toBeVisible();
 }
 
-test.describe("construction guide", () => {
-  test("renders materials + loom + sequence after a generate", async ({
-    page,
-  }) => {
+test.describe("build guide", () => {
+  test("loads with loom, step controls, and tabs", async ({ page }) => {
     test.setTimeout(90_000);
     await primeAndNavigate(page);
+    await expect(page.getByText("Current nail")).toBeVisible();
     await expect(
-      page.getByRole("region", { name: "Bill of materials" }),
+      page.getByRole("tab", { name: /^Materials/ }),
     ).toBeVisible();
-    await expect(page.getByText(/\d+\.\d m \(/)).toBeVisible();
-    await expect(page.getByRole("img", { name: "Nail layout" })).toBeVisible();
     await expect(
-      page.getByRole("region", { name: "Thread sequence" }),
+      page.getByRole("tab", { name: /^How to build it/ }),
     ).toBeVisible();
-    const items = page.getByRole("listitem");
-    expect(await items.count()).toBeGreaterThan(10);
+    await expect(page.getByRole("term").filter({ hasText: "board" }).first())
+      .toBeVisible();
   });
 
-  test("Space advances the current step", async ({ page }) => {
+  test("ArrowRight advances, ArrowLeft rewinds", async ({ page }) => {
     test.setTimeout(90_000);
     await primeAndNavigate(page);
-    const before = await page.getByText(/step 1 \//).textContent();
-    expect(before).toBeTruthy();
+    const loom = page.getByRole("img", { name: /Loom, step/ });
+    await expect(loom).toHaveAttribute("aria-label", /step 1 of/);
+    await page.keyboard.press("ArrowRight");
+    await expect(loom).toHaveAttribute("aria-label", /step 2 of/);
+    await page.keyboard.press("ArrowRight");
+    await expect(loom).toHaveAttribute("aria-label", /step 3 of/);
+    await page.keyboard.press("ArrowLeft");
+    await expect(loom).toHaveAttribute("aria-label", /step 2 of/);
+  });
+
+  test("Space toggles auto-play", async ({ page }) => {
+    test.setTimeout(90_000);
+    await primeAndNavigate(page);
+    await expect(
+      page.getByRole("button", { name: "Start auto-advance" }),
+    ).toBeVisible();
     await page.keyboard.press("Space");
-    await expect(page.getByText(/step 2 \//)).toBeVisible({ timeout: 2_000 });
+    await expect(
+      page.getByRole("button", { name: "Pause auto-advance" }),
+    ).toBeVisible();
+    await page.keyboard.press("Space");
+    await expect(
+      page.getByRole("button", { name: "Start auto-advance" }),
+    ).toBeVisible();
   });
 
-  test("checkbox progress persists across reloads", async ({ page }) => {
+  test("Read aloud toggles aria-pressed", async ({ page }) => {
+    test.setTimeout(90_000);
+    await primeAndNavigate(page);
+    const btn = page.getByRole("button", { name: /Read aloud|Reading/ });
+    await expect(btn).toHaveAttribute("aria-pressed", "false");
+    await btn.click();
+    await expect(btn).toHaveAttribute("aria-pressed", "true");
+    await btn.click();
+    await expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("progress persists across reload", async ({ page }) => {
     test.setTimeout(120_000);
     await primeAndNavigate(page);
-    const firstCheckbox = page
-      .getByRole("listitem")
-      .first()
-      .getByRole("checkbox");
-    await firstCheckbox.check();
-    await expect(firstCheckbox).toBeChecked();
+    const loom = page.getByRole("img", { name: /Loom, step/ });
+    for (let i = 0; i < 5; i++) {
+      await page.keyboard.press("ArrowRight");
+    }
+    await expect(loom).toHaveAttribute("aria-label", /step 6 of/);
+
     await page.reload();
-    await page.goto("/build");
     await expect(
-      page.getByRole("heading", { name: "Construction guide" }),
-    ).toBeVisible();
-    const afterReload = page
-      .getByRole("listitem")
-      .first()
-      .getByRole("checkbox");
-    await expect(afterReload).toBeChecked({ timeout: 20_000 });
+      page.getByRole("heading", { name: "Build guide" }),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(
+      page.getByRole("img", { name: /Loom, step/ }),
+    ).toHaveAttribute("aria-label", /step 6 of/, { timeout: 20_000 });
   });
 
-  test("hands-free overlay opens and shows the current nail", async ({
-    page,
-  }) => {
+  test("Instructions tab reveals step-by-step sections", async ({ page }) => {
     test.setTimeout(90_000);
     await primeAndNavigate(page);
-    await page.getByRole("button", { name: "Hands-free mode" }).click();
+    await page.getByRole("tab", { name: /^How to build it/ }).click();
     await expect(
-      page.getByRole("dialog", { name: "Hands-free build mode" }),
+      page.getByRole("heading", { name: "Prepare the board" }),
     ).toBeVisible();
-    // Pause so the auto-metronome doesn't fight the test.
-    await page.getByRole("button", { name: "Pause" }).click();
-    await page.getByRole("button", { name: "Next nail" }).click();
-    await expect(page.getByText(/step 2 \//).first()).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
     await expect(
-      page.getByRole("dialog", { name: "Hands-free build mode" }),
-    ).toBeHidden();
+      page.getByRole("heading", { name: "Work the sequence" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /If something goes sideways/ }),
+    ).toBeVisible();
+  });
+
+  test("Printables buttons render under Materials tab", async ({ page }) => {
+    test.setTimeout(90_000);
+    await primeAndNavigate(page);
+    const template = page.getByRole("button", { name: /Nail template/ });
+    const booklet = page.getByRole("button", { name: /Sequence booklet/ });
+    await expect(template).toBeVisible();
+    await expect(template).toBeEnabled();
+    await expect(booklet).toBeVisible();
+    await expect(booklet).toBeEnabled();
   });
 });

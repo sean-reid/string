@@ -20,14 +20,14 @@ test.describe("app shell", () => {
     expect(errors).toEqual([]);
   });
 
-  test("navigation to /build shows construction guide placeholder", async ({
+  test("navigation to /build shows build guide placeholder", async ({
     page,
   }) => {
     await page.goto("/");
     await page.getByRole("link", { name: "Build" }).click();
     await expect(page).toHaveURL(/\/build$/);
     await expect(
-      page.getByRole("heading", { name: "Construction guide" }),
+      page.getByRole("heading", { name: "Build guide" }),
     ).toBeVisible();
   });
 
