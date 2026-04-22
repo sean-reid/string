@@ -108,16 +108,14 @@ export function threadCoverage(thread: ThreadSpec, board: BoardSpec): number {
 /**
  * Scales geometric thread coverage down to a physically realistic
  * per-crossing opacity. The halfmonty / kmmeerts reference uses
- * LINE_WEIGHT ≈ 0.031 — very low, which pushes the algorithm toward
- * ~4000 chords of pure luminance accumulation on a single thread.
- * We want individual colored chords to register visibly at this line
- * budget too, so we use a moderately higher attenuation (0.3 → ~0.10
- * effective opacity on our 0.34 geometric coverage). Each crossing
- * is then a clearly visible line, density builds fast enough to get
- * Vrellis-grade coverage well before the 4000-chord budget runs out,
- * and colored threads stay visually distinct on the board.
+ * LINE_WEIGHT ≈ 0.031 — very low per crossing, demanding many chords
+ * before local darkness emerges. We split the difference: 0.2 gives
+ * ~0.07 effective opacity on our 0.34 geometric coverage, which
+ * lets the default 4000-chord budget saturate the image's darkest
+ * pixels without also saturating everything else by chord 1500 and
+ * leaving the back half of the budget to accumulate noise on the rim.
  */
-const THREAD_OPACITY_ATTENUATION = 0.3;
+const THREAD_OPACITY_ATTENUATION = 0.2;
 
 /**
  * Minimum pin-index skip to guarantee the chord is at least `pct` of the

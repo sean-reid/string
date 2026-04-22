@@ -103,7 +103,7 @@ export function ParameterRail() {
 
           <Slider
             label="Nails"
-            min={128}
+            min={200}
             max={360}
             step={1}
             value={physical.pinCount}
@@ -113,8 +113,8 @@ export function ParameterRail() {
           />
           <Slider
             label="Lines"
-            min={500}
-            max={6000}
+            min={1000}
+            max={5000}
             step={50}
             value={physical.lineBudget}
             onChange={(v) => setPhysical({ lineBudget: v })}

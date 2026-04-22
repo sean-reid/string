@@ -632,23 +632,29 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
     });
 }
 
-/// Single-best-thread decomposition: assign each pixel's darkening
-/// demand entirely to the palette thread whose basis best aligns
-/// with the target-minus-board vector `b`. Other threads get zero.
+/// Orthogonal matching pursuit (OMP) for a tiny NNLS problem. Picks
+/// threads one at a time in order of which reduces residual fastest,
+/// so the decomposition stays sparse — typically 1–2 active threads
+/// per pixel — rather than smearing weight across every thread like a
+/// full multiplicative-update NNLS does when the basis is ill-
+/// conditioned (dark threads' `board − thread_i` all point in roughly
+/// the same direction, which is our exact situation).
 ///
-/// This is simpler and visibly more effective than full NNLS. The
-/// problem with NNLS here is that the thread basis vectors
-/// (board − thread_i) for dark threads are all roughly
-/// `[0.8, 0.8, 0.7]` — they point in nearly the same direction. The
-/// least-squares optimum distributes weight almost evenly across
-/// threads, making the per-thread density fields indistinguishable
-/// and erasing any hue signal from chord scoring.
+/// Sparse decomposition gives three properties we need at once:
 ///
-/// Hard-assignment to a single thread per pixel is the right partitive-
-/// mixing model anyway: each physical crossing is one thread's color,
-/// not a blend of several at the pixel. Color diversity emerges at
-/// the neighborhood scale as neighboring pixels, owned by different
-/// threads, render together in the viewer's eye.
+/// 1. **Luminance structure is preserved.** Per-pixel density
+///    magnitude scales with `|b|`, so bright pixels (b small) demand
+///    few chord crossings and dark pixels (b large) demand many —
+///    the face-structure-from-luminance signal mono relies on stays
+///    intact.
+/// 2. **Color diversity is preserved.** Different pixels, guided by
+///    hue, pick different threads. A chord through a warm-skin
+///    region scores high for a warm thread; a chord through a dark
+///    shadow scores high for the darker thread.
+/// 3. **Numerical stability.** Greedy-sparse doesn't rely on
+///    precisely-determined weights from an ill-conditioned system,
+///    so tiny numerical differences don't flip pixels between
+///    threads and create incoherent noise.
 fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
     for wi in w.iter_mut().take(k) {
         *wi = 0.0;
@@ -656,31 +662,52 @@ fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
     if k == 0 {
         return;
     }
-    // Best thread i = argmax of `(b · basis_i) / |basis_i|` — the
-    // normalized projection of b onto each thread's darkening
-    // direction. `atb[i] = b · basis_i`; `ata[i*k + i] = |basis_i|²`.
-    // So `atb[i] / sqrt(ata[i*k + i])` gives the cosine-scaled length.
-    let mut best_i = 0usize;
-    let mut best_score = f32::NEG_INFINITY;
-    for i in 0..k {
-        let norm_sq = ata[i * k + i];
-        if norm_sq <= 1e-8 {
-            continue;
+
+    // Residual projections — one per thread. Starts as `atb` and is
+    // reduced whenever a thread is selected and its component subtracted.
+    let mut proj = atb.to_vec();
+    // Track used threads so we don't pick the same one twice.
+    let mut used = vec![false; k];
+
+    // At most `min(k, 3)` passes — three threads per pixel is more
+    // than enough expressive power; beyond that we're fitting noise.
+    let max_active = k.min(3);
+    for _ in 0..max_active {
+        let mut best_i = usize::MAX;
+        let mut best_score = f32::NEG_INFINITY;
+        for i in 0..k {
+            if used[i] {
+                continue;
+            }
+            let norm_sq = ata[i * k + i];
+            if norm_sq <= 1e-8 {
+                continue;
+            }
+            // Cosine-scaled projection: how much of the current
+            // residual does thread i explain, per unit of its basis.
+            let aligned = proj[i] / norm_sq.sqrt();
+            if aligned > best_score {
+                best_score = aligned;
+                best_i = i;
+            }
         }
-        let aligned = atb[i] / norm_sq.sqrt();
-        if aligned > best_score {
-            best_score = aligned;
-            best_i = i;
+        if best_i == usize::MAX || best_score <= 0.0 {
+            break;
+        }
+        used[best_i] = true;
+
+        // Magnitude along chosen basis:
+        // `w = (b · basis) / |basis|² = proj[i] / ata[i,i]`, clamped ≥ 0.
+        let coeff = (proj[best_i] / ata[best_i * k + best_i]).max(0.0);
+        w[best_i] += coeff;
+
+        // Subtract chosen thread's contribution from remaining
+        // residual projections: `proj[j] -= coeff · (basis_i · basis_j)
+        //                              = coeff · ata[i*k + j]`.
+        for j in 0..k {
+            proj[j] -= coeff * ata[best_i * k + j];
         }
     }
-    if best_score <= 0.0 {
-        return;
-    }
-    // Magnitude: the component of b along basis_best. That's
-    // `(b · basis_best) / |basis_best|² = atb[best] / ata[best²]`,
-    // clamped non-negative.
-    let density = (atb[best_i] / ata[best_i * k + best_i]).max(0.0);
-    w[best_i] = density;
 }
 
 /// Alpha-composite a thread onto the canvas along a chord. Each touched
