@@ -5,12 +5,15 @@ import { downloadBlob, safeFilename } from "@/export/download";
 import { buildBookletPdf } from "./pdf-booklet";
 import { buildTemplatePdf } from "./pdf-template";
 
-export function Printables() {
+interface PrintablesProps {
+  sequence: readonly number[];
+  sequenceColors: readonly number[];
+}
+
+export function Printables({ sequence, sequenceColors }: PrintablesProps) {
   const physical = useSolverStore((s) => s.physical);
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
-  const sequence = useSolverStore((s) => s.sequence);
-  const sequenceColors = useSolverStore((s) => s.sequenceColors);
   const palette = useSolverStore((s) => s.palette);
   const disabled = !pinPositions || imageSize <= 0 || sequence.length < 2;
 

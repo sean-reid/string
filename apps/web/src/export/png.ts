@@ -1,6 +1,4 @@
 interface PngExportInput {
-  bitmap: ImageBitmap | null;
-  showSource: boolean;
   sequence: readonly number[];
   /** Palette index per line, parallel to `sequence`. Must be the same
    *  length as `sequence`. */
@@ -14,7 +12,7 @@ interface PngExportInput {
 }
 
 const STROKE_BATCH = 16;
-const FALLBACK_COLOR = "#f4efe5";
+const FALLBACK_COLOR = "#111111";
 
 /**
  * Render the loom at an arbitrary output resolution by replaying the
@@ -36,14 +34,8 @@ export async function renderPng(input: PngExportInput): Promise<Blob> {
   ctx.arc(outputSize / 2, outputSize / 2, radius, 0, Math.PI * 2);
   ctx.clip();
 
-  ctx.fillStyle = "#0E0D0B";
+  ctx.fillStyle = "#F4EFE5";
   ctx.fillRect(0, 0, outputSize, outputSize);
-
-  if (input.showSource && input.bitmap) {
-    ctx.globalAlpha = 0.2;
-    ctx.drawImage(input.bitmap, 0, 0, outputSize, outputSize);
-    ctx.globalAlpha = 1;
-  }
 
   if (input.pinPositions && input.sequence.length >= 2) {
     ctx.globalAlpha = input.lineOpacity;

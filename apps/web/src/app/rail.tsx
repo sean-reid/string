@@ -1,44 +1,21 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useRef } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
-import { useViewStore } from "@/solver/view-store";
 import { ExportPanel } from "@/export/export-panel";
 import {
   BOARDS,
-  MAX_PALETTE_SIZE,
   THREADS,
   deriveSolverParams,
   estimatedBuildHours,
   estimatedThreadMeters,
   minSkipPins,
   threadCoverage,
-  type BoardId,
-  type PaletteMode,
-  type ThreadId,
 } from "@/solver/physics";
-import { Segmented } from "@/components/segmented";
 import { Slider } from "@/components/slider";
-
-const BOARD_OPTIONS: Array<{ value: BoardId; label: string }> = [
-  { value: "b12", label: "12 in" },
-  { value: "b16", label: "16 in" },
-  { value: "b20", label: "20 in" },
-  { value: "b24", label: "24 in" },
-];
-
-const THREAD_OPTIONS: Array<{ value: ThreadId; label: string }> = [
-  { value: "polyester", label: "Polyester" },
-  { value: "dmcFloss", label: "Embroidery" },
-  { value: "crochetCotton", label: "Cotton #10" },
-];
-
-const PALETTE_MODE_OPTIONS: Array<{ value: PaletteMode; label: string }> = [
-  { value: "auto", label: "Auto" },
-  { value: "manual", label: "Manual" },
-];
 
 export function ParameterRail() {
   const imageStatus = useImageStore((s) => s.status);
+  const imageHash = useImageStore((s) => s.meta?.hash ?? null);
   const physical = useSolverStore((s) => s.physical);
   const setPhysical = useSolverStore((s) => s.setPhysical);
   const solverStatus = useSolverStore((s) => s.status);
@@ -46,8 +23,6 @@ export function ParameterRail() {
   const lineBudget = useSolverStore((s) => s.lineBudget);
   const start = useSolverStore((s) => s.start);
   const cancel = useSolverStore((s) => s.cancel);
-  const showSource = useViewStore((s) => s.showSource);
-  const toggleSource = useViewStore((s) => s.toggleSource);
   const resetImage = useImageStore((s) => s.reset);
   const resetSolver = useSolverStore((s) => s.reset);
 
@@ -57,11 +32,18 @@ export function ParameterRail() {
     resetImage();
   }, [cancel, resetSolver, resetImage]);
 
+  // Auto-solve on image change. Keyed on image hash with a ref so the
+  // solve fires exactly once per distinct image (subsequent runs go
+  // through the manual "Generate again" button).
+  const lastSolvedHash = useRef<string | null>(null);
   useEffect(() => {
     if (imageStatus !== "ready") return;
-    if (solverStatus !== "idle") return;
+    if (!imageHash) return;
+    if (solverStatus === "running") return;
+    if (lastSolvedHash.current === imageHash) return;
+    lastSolvedHash.current = imageHash;
     void start();
-  }, [imageStatus, solverStatus, start]);
+  }, [imageStatus, imageHash, solverStatus, start]);
 
   useEffect(() => {
     if (solverStatus !== "running") return;
@@ -104,25 +86,9 @@ export function ParameterRail() {
 
       {hasImage && (
         <div className="flex flex-col gap-5">
-          <Segmented
-            label="Board"
-            value={physical.boardId}
-            onChange={(v) => setPhysical({ boardId: v })}
-            options={BOARD_OPTIONS}
-            disabled={running}
-          />
-          <Segmented
-            label="Thread type"
-            value={physical.threadId}
-            onChange={(v) => setPhysical({ threadId: v })}
-            options={THREAD_OPTIONS}
-            disabled={running}
-          />
-          <PalettePicker disabled={running} />
-
           <Slider
             label="Nails"
-            min={128}
+            min={200}
             max={360}
             step={1}
             value={physical.pinCount}
@@ -132,22 +98,12 @@ export function ParameterRail() {
           />
           <Slider
             label="Lines"
-            min={500}
+            min={1000}
             max={6000}
-            step={50}
+            step={100}
             value={physical.lineBudget}
             onChange={(v) => setPhysical({ lineBudget: v })}
             suffix={`${physical.lineBudget.toLocaleString()}`}
-            disabled={running}
-          />
-          <Slider
-            label="Min chord"
-            min={0.05}
-            max={0.5}
-            step={0.01}
-            value={physical.minChordPct}
-            onChange={(v) => setPhysical({ minChordPct: v })}
-            suffix={`${Math.round(physical.minChordPct * 100)}%`}
             disabled={running}
           />
 
@@ -186,16 +142,6 @@ export function ParameterRail() {
             >
               New image
             </button>
-            <label className="mt-1 flex items-center justify-between text-sm text-muted">
-              <span>Show source</span>
-              <input
-                type="checkbox"
-                checked={showSource}
-                onChange={toggleSource}
-                className="h-4 w-4 cursor-pointer accent-ink"
-                aria-label="Show source image underlay"
-              />
-            </label>
             {running && (
               <p className="font-mono text-xs tabular-nums text-muted">
                 {linesDrawn.toLocaleString()} /{" "}
@@ -222,174 +168,4 @@ export function ParameterRail() {
       )}
     </aside>
   );
-}
-
-function PalettePicker({ disabled }: { disabled: boolean }) {
-  const physical = useSolverStore((s) => s.physical);
-  const setPhysical = useSolverStore((s) => s.setPhysical);
-  const storePalette = useSolverStore((s) => s.palette);
-
-  // A persisted session that predates the palette picker can have
-  // paletteMode / paletteCount missing. Treat that as "auto" with the
-  // current palette length so the picker still renders and the user
-  // can adjust. The migration in solver/store.ts fills these in on next
-  // load, but the guard keeps the UI from vanishing on the first render
-  // of an in-flight rehydrate.
-  const mode: PaletteMode = physical.paletteMode ?? "auto";
-  const paletteCount =
-    physical.paletteCount ?? Math.max(1, physical.palette?.length ?? 1);
-  const previewPalette =
-    mode === "auto" ? storePalette : physical.palette;
-  const count =
-    mode === "auto"
-      ? paletteCount
-      : Math.max(
-          1,
-          Math.min(physical.palette?.length ?? paletteCount, MAX_PALETTE_SIZE),
-        );
-
-  const setMode = (next: PaletteMode) => {
-    if (next === mode) return;
-    if (next === "manual") {
-      // Seed manual from whatever palette we last had so the user starts
-      // with a reasonable row instead of an empty one.
-      const seed =
-        storePalette.length >= paletteCount
-          ? storePalette.slice(0, paletteCount)
-          : ensureLength(
-              storePalette.length ? storePalette : [defaultSwatch()],
-              paletteCount,
-            );
-      setPhysical({ paletteMode: "manual", palette: seed, paletteCount });
-    } else {
-      setPhysical({ paletteMode: "auto", paletteCount });
-    }
-  };
-
-  const setCount = (next: number) => {
-    const clamped = Math.max(1, Math.min(next, MAX_PALETTE_SIZE));
-    if (mode === "auto") {
-      setPhysical({ paletteCount: clamped });
-    } else {
-      const current = physical.palette;
-      const resized = ensureLength(current, clamped);
-      setPhysical({ palette: resized, paletteCount: clamped });
-    }
-  };
-
-  const updateSwatch = (index: number, hex: string) => {
-    if (mode !== "manual") return;
-    const next = (physical.palette ?? []).slice();
-    next[index] = hex;
-    setPhysical({ palette: next });
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-baseline justify-between">
-        <span className="font-mono text-[11px] uppercase tracking-wide text-muted">
-          Colors
-        </span>
-        <span className="font-mono text-[11px] tabular-nums text-muted">
-          {count} of {MAX_PALETTE_SIZE}
-        </span>
-      </div>
-      <Segmented
-        label="Palette mode"
-        hideLabel
-        value={mode}
-        onChange={setMode}
-        options={PALETTE_MODE_OPTIONS}
-        disabled={disabled}
-      />
-      <Slider
-        label={mode === "auto" ? "Palette size" : "Swatches"}
-        min={1}
-        max={MAX_PALETTE_SIZE}
-        step={1}
-        value={count}
-        onChange={setCount}
-        suffix={`${count}`}
-        disabled={disabled}
-      />
-      <SwatchRow
-        mode={mode}
-        palette={previewPalette}
-        count={count}
-        onSwatchChange={updateSwatch}
-        disabled={disabled}
-      />
-      {mode === "auto" ? (
-        <p className="text-[11px] text-muted">
-          Palette is derived from the image with k-means each time you
-          generate. Hit Generate to refresh the preview.
-        </p>
-      ) : (
-        <p className="text-[11px] text-muted">
-          Pick the exact thread colors you own. Tap a swatch to edit.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function SwatchRow({
-  mode,
-  palette,
-  count,
-  onSwatchChange,
-  disabled,
-}: {
-  mode: PaletteMode;
-  palette: readonly string[];
-  count: number;
-  onSwatchChange: (index: number, hex: string) => void;
-  disabled: boolean;
-}) {
-  const entries = ensureLength(palette.length ? palette : [defaultSwatch()], count);
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {entries.map((hex, idx) => {
-        if (mode === "manual") {
-          return (
-            <label
-              key={idx}
-              className="relative h-7 w-7 overflow-hidden rounded-md border border-line"
-              style={{ background: hex }}
-              title={hex}
-            >
-              <input
-                type="color"
-                value={hex}
-                onChange={(e) => onSwatchChange(idx, e.target.value)}
-                disabled={disabled}
-                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                aria-label={`Swatch ${idx + 1}: ${hex}`}
-              />
-            </label>
-          );
-        }
-        return (
-          <span
-            key={idx}
-            aria-label={`Auto swatch ${idx + 1}: ${hex}`}
-            title={hex}
-            className="h-7 w-7 rounded-md border border-line"
-            style={{ background: hex }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function defaultSwatch(): string {
-  return "#f4efe5";
-}
-
-function ensureLength(palette: readonly string[], length: number): string[] {
-  if (palette.length === length) return palette.slice();
-  if (palette.length > length) return palette.slice(0, length);
-  const fill = palette.length > 0 ? palette[palette.length - 1]! : defaultSwatch();
-  return [...palette, ...Array.from({ length: length - palette.length }, () => fill)];
 }

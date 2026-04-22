@@ -3,7 +3,7 @@ import { useSolverStore } from "@/solver/store";
 import { BOARDS, THREADS, threadCoverage } from "@/solver/physics";
 
 const DISPLAY_CAP = 1024;
-const FALLBACK_COLOR = "#f4efe5";
+const FALLBACK_COLOR = "#111111";
 const LINE_WIDTH = 0.9;
 // Each stroke() call composites as one shape, so overlaps within a batch
 // don't stack. Multiple batches composite over each other, giving the
@@ -19,7 +19,11 @@ const STROKE_BATCH = 16;
 export function LinesCanvas() {
   const sequence = useSolverStore((s) => s.sequence);
   const sequenceColors = useSolverStore((s) => s.sequenceColors);
-  const palette = useSolverStore((s) => s.palette);
+  // Render using the user's actual palette, not store.palette (which
+  // is the image-derived suggestion list for the "+" / auto-pick
+  // buttons). Editing a swatch in the UI must take effect on the
+  // rendered preview.
+  const palette = useSolverStore((s) => s.physical.palette);
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const generationId = useSolverStore((s) => s.generationId);

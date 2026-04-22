@@ -10,8 +10,9 @@
   --color-accent: #d4541f;
   --color-accent-soft: #f5d6c5;
 
-  /* Dark canvas used while rendering. */
-  --color-canvas: #0e0d0b;
+  /* Light fabric canvas used while rendering — dark threads subtract
+   * light against this cream ground (Vrellis paradigm). */
+  --color-canvas: #f4efe5;
   --color-canvas-muted: #8c867b;
 
   --font-sans:

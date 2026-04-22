@@ -5,7 +5,6 @@ import {
   DEFAULT_PHYSICAL,
   DEFAULT_THREAD_COLOR,
   paletteToSrgbBytes,
-  srgbBytesToHex,
   type PhysicalParams,
   deriveSolverParams,
 } from "./physics";
@@ -22,10 +21,12 @@ interface SolverState {
   physical: PhysicalParams;
   seed: bigint;
   sequence: number[];
-  /** Palette index per line in `sequence`. Length tracks `sequence.length`;
-   *  entry 0 pairs with the anchor pin (always 0). */
+  /** Palette index per line in `sequence`. Always-zero in mono-only
+   *  mode; kept as a stored field for downstream exports that
+   *  serialize it regardless. */
   sequenceColors: number[];
-  /** sRGB hex strings, one per palette index; PR 2 is always length 1. */
+  /** Mirror of `physical.palette` for exports and canvas rendering.
+   *  In mono-only mode this is always `[#111111]`. */
   palette: string[];
   pinPositions: Float32Array | null;
   pinCount: number;
@@ -72,7 +73,7 @@ const baseStoreFactory = (
   seed: 0x53_74_72_69_6e_67_01n,
   sequence: [],
   sequenceColors: [],
-  palette: ["#f4efe5"],
+  palette: ["#111111"],
   pinPositions: null,
   pinCount: 0,
   imageSize: 0,
@@ -118,28 +119,14 @@ const baseStoreFactory = (
       const physical = get().physical;
       const remote = getSolverWorker();
 
-      // Resolve the palette before preprocessing so we know which mode
-      // (grayscale vs color-per-channel) the solver expects.
-      let palette = [...physical.palette];
-      if (physical.paletteMode === "auto") {
-        const requested = Math.max(1, Math.min(physical.paletteCount, 6));
-        const bytes = await remote.extractPalette(
-          new Uint8Array(image.colorRgba),
-          image.meta.size,
-          requested,
-          get().seed,
-        );
-        if (get().generationId !== generationId) return;
-        palette = srgbBytesToHex(bytes);
-        useSolverStore.setState((prev) => ({
-          physical: { ...prev.physical, palette },
-        }));
-      }
+      // Mono-only: always a single-black palette. No image-derived
+      // palette extraction, no suggestions list.
+      const palette = [...physical.palette];
 
       const processed = await remote.preprocess(
         new Uint8Array(image.colorRgba),
         image.meta.size,
-        palette.length === 1,
+        true,
       );
       if (get().generationId !== generationId) return;
 
@@ -161,8 +148,11 @@ const baseStoreFactory = (
         extras,
       );
       if (get().generationId !== generationId) return;
+      // Note: do NOT write `palette` here. `store.palette` holds the
+      // image-derived suggestions populated before the solve; the
+      // user's chosen palette lives in `physical.palette` and doesn't
+      // need mirroring back into the store.
       set({
-        palette,
         pinPositions: init.pinPositions,
         pinCount: init.pinCount,
         lineBudget: init.lineBudget,
@@ -236,23 +226,31 @@ export const useSolverStore = create<SolverState>()(
       linesDrawn: state.linesDrawn,
       lineBudget: state.lineBudget,
     }),
-    version: 3,
+    version: 5,
     migrate: (persisted, version) => {
       const state = persisted as Partial<SolverState> | undefined;
       if (!state) return state as unknown as SolverState;
-      // v1 → v2: introduce per-line colors + a store palette alongside the
-      // legacy pin sequence.
       if (version < 2) {
         const seq = state.sequence ?? [];
         state.sequenceColors = new Array(seq.length).fill(0);
         state.palette = [DEFAULT_THREAD_COLOR];
       }
-      // v2 → v3: palette picker added paletteMode + paletteCount to
-      // PhysicalParams. Older saved sessions are missing those fields, so
-      // the rail's PalettePicker ended up with paletteMode = undefined
-      // and never rendered. Backfill defaults from the persisted palette
-      // (if any) so the user's color choices survive across versions.
-      if (version < 3) {
+      // v5: mono-only. Force palette to default black regardless of
+      // what was persisted from a multi-color session.
+      if (version < 5) {
+        state.palette = [DEFAULT_THREAD_COLOR];
+        if (state.physical) {
+          state.physical = {
+            ...state.physical,
+            palette: [DEFAULT_THREAD_COLOR],
+          };
+        }
+      }
+      // v3 / v4: palette UX dropped auto vs manual modes and the
+      // paletteCount slider in favour of direct swatch editing. Strip
+      // the old fields if they survived in persisted state; rebuild
+      // `physical` around what we still keep.
+      if (version < 4) {
         const existing = state.physical as Partial<PhysicalParams> | undefined;
         const paletteFromPhysical = existing?.palette;
         const paletteFromRoot = state.palette;
@@ -266,9 +264,6 @@ export const useSolverStore = create<SolverState>()(
           ...DEFAULT_PHYSICAL,
           ...(existing ?? {}),
           palette: resolvedPalette,
-          paletteMode: existing?.paletteMode ?? DEFAULT_PHYSICAL.paletteMode,
-          paletteCount:
-            existing?.paletteCount ?? Math.max(1, resolvedPalette.length),
         };
       }
       return state as SolverState;

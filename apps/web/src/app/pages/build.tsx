@@ -8,6 +8,7 @@ import { LoomSvg } from "@/guide/loom-svg";
 import { MaterialsList } from "@/guide/materials";
 import { Printables } from "@/guide/printables";
 import { useProgressStore } from "@/guide/progress-store";
+import { regroupByColor } from "@/guide/regroup";
 import { StepDisplay } from "@/guide/step-display";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
@@ -25,6 +26,19 @@ export function BuildPage() {
   const ready =
     sequence.length > 1 && pinPositions != null && imageSize > 0 && imageMeta;
 
+  // Solver emits interleaved chords — every step it picks whatever
+  // thread reduces residual the most, so colors jump around. For the
+  // physical build we regroup by palette index (dark → light since the
+  // palette is already sorted that way), preserving within-color order.
+  // The Compose preview stays interleaved; only the build guide uses
+  // this view.
+  const regrouped = useMemo(
+    () => regroupByColor(sequence, sequenceColors),
+    [sequence, sequenceColors],
+  );
+  const buildSequence = regrouped.sequence;
+  const buildColors = regrouped.colors;
+
   const patternId = useMemo(() => {
     if (!imageMeta) return null;
     return `${imageMeta.hash}.${physical.pinCount}.${physical.lineBudget}.${physical.threadId}.${physical.boardId}`;
@@ -34,13 +48,13 @@ export function BuildPage() {
     () =>
       computeBom(
         physical,
-        sequence,
+        buildSequence,
         pinPositions,
         imageSize,
-        sequenceColors,
+        buildColors,
         palette,
       ),
-    [physical, sequence, pinPositions, imageSize, sequenceColors, palette],
+    [physical, buildSequence, pinPositions, imageSize, buildColors, palette],
   );
 
   const loadProgress = useProgressStore((s) => s.load);
@@ -51,10 +65,10 @@ export function BuildPage() {
   const [announce, setAnnounce] = useState(false);
 
   useEffect(() => {
-    if (patternId && sequence.length > 0) {
-      loadProgress(patternId, sequence.length);
+    if (patternId && buildSequence.length > 0) {
+      loadProgress(patternId, buildSequence.length);
     }
-  }, [patternId, sequence.length, loadProgress]);
+  }, [patternId, buildSequence.length, loadProgress]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -124,15 +138,15 @@ export function BuildPage() {
               pinPositions={pinPositions}
               imageSize={imageSize}
               pinCount={physical.pinCount}
-              sequence={sequence}
-              sequenceColors={sequenceColors}
+              sequence={buildSequence}
+              sequenceColors={buildColors}
               palette={palette}
               currentStep={currentStep}
             />
           </div>
         </div>
         <StepDisplay
-          sequence={sequence}
+          sequence={buildSequence}
           playing={autoPlay.playing}
           onTogglePlay={autoPlay.toggle}
           announce={announce}
@@ -149,7 +163,10 @@ export function BuildPage() {
               content: (
                 <div className="flex flex-col gap-10">
                   <MaterialsList bom={bom} />
-                  <Printables />
+                  <Printables
+                    sequence={buildSequence}
+                    sequenceColors={buildColors}
+                  />
                 </div>
               ),
             },
