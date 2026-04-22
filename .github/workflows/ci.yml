@@ -108,13 +108,16 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ steps.browser.outputs.id }}
+          restore-keys: |
+            playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            playwright-${{ runner.os }}-
       - name: install playwright browsers
+        # Both commands are idempotent: install-deps reinstalls apt packages
+        # (not cached), install is a no-op when the cache already restored
+        # the browser binary and downloads it when it didn't.
         run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            pnpm --filter web exec playwright install-deps ${{ steps.browser.outputs.id }}
-          else
-            pnpm --filter web exec playwright install --with-deps ${{ steps.browser.outputs.id }}
-          fi
+          pnpm --filter web exec playwright install-deps ${{ steps.browser.outputs.id }}
+          pnpm --filter web exec playwright install ${{ steps.browser.outputs.id }}
       - name: download web dist
         uses: actions/download-artifact@v4
         with:
