@@ -1,10 +1,20 @@
 use wasm_bindgen::prelude::*;
 
+pub mod palette_extract;
 pub mod preprocess;
 pub mod solver;
 
 use preprocess::Params;
 use solver::{palette::Palette, weight::FaceBox, Solver as GreedySolver, SolverConfig};
+
+/// Wasm-exposed palette extractor. Returns `k * 3` sRGB bytes sorted by
+/// cluster population (most-used color first). See `palette_extract` for
+/// the k-means + downsample details.
+#[wasm_bindgen(js_name = extractPalette)]
+pub fn extract_palette(rgba: &[u8], size: u32, k: u32, seed: u64) -> Result<Vec<u8>, JsValue> {
+    palette_extract::extract_palette_bytes(rgba, size as usize, k as usize, seed)
+        .map_err(JsValue::from_str)
+}
 
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
@@ -29,6 +39,7 @@ pub struct PreprocessParams {
     pub unsharp_amount: f32,
     pub gamma: f32,
     pub mask_circular: bool,
+    pub grayscale: bool,
 }
 
 #[wasm_bindgen]
@@ -45,6 +56,7 @@ impl PreprocessParams {
             unsharp_amount: defaults.unsharp_amount,
             gamma: defaults.gamma,
             mask_circular: defaults.mask_circular,
+            grayscale: defaults.grayscale,
         }
     }
 }
@@ -66,6 +78,7 @@ impl From<PreprocessParams> for Params {
             unsharp_amount: p.unsharp_amount,
             gamma: p.gamma,
             mask_circular: p.mask_circular,
+            grayscale: p.grayscale,
         }
     }
 }
