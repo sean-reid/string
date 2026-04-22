@@ -1,12 +1,13 @@
 //! Image preprocessing pipeline for the string-art solver.
 //!
-//! Stages run in order on a square luminance buffer:
-//!   Rec.709 luminance -> circular mask -> bilateral -> CLAHE
-//!   -> unsharp -> gamma.
+//! Stages run in order on each working channel:
+//!   circular mask -> bilateral -> CLAHE -> unsharp -> gamma.
 //!
-//! Inputs and outputs are RGBA8. Internally the pipeline works on f32
-//! single-channel luminance in `[0.0, 1.0]`. `expand_rgba` broadcasts the
-//! final luminance back to R=G=B=luminance at the end.
+//! Inputs and outputs are RGBA8. When `params.grayscale` is `true` (the
+//! default) the pipeline collapses to Rec.709 luminance up-front and the
+//! output RGBA has R=G=B=luminance. When `grayscale` is `false` each R/G/B
+//! channel is preprocessed independently so chroma is preserved — used by
+//! color-mode solves where the solver picks from a thread palette.
 
 pub mod bilateral;
 pub mod clahe;
@@ -30,6 +31,10 @@ pub struct Params {
     pub unsharp_amount: f32,
     pub gamma: f32,
     pub mask_circular: bool,
+    /// `true` collapses the image to luminance up front (the default for
+    /// monochrome solves); `false` keeps chroma by running the filter stack
+    /// per R/G/B channel.
+    pub grayscale: bool,
 }
 
 impl Default for Params {
@@ -48,6 +53,7 @@ impl Default for Params {
             unsharp_amount: 0.25,
             gamma: 1.0,
             mask_circular: true,
+            grayscale: true,
         }
     }
 }
@@ -59,23 +65,35 @@ pub fn run(rgba: &[u8], width: usize, height: usize, params: Params) -> Vec<u8> 
         "rgba length must equal w*h*4"
     );
 
-    let mut lum = rec709(rgba, width, height);
+    if params.grayscale {
+        let mut lum = rec709(rgba, width, height);
+        filter_channel(&mut lum, width, height, &params);
+        expand_rgba(&lum, width, height)
+    } else {
+        let mut channels = split_channels(rgba, width, height);
+        for chan in channels.iter_mut() {
+            filter_channel(chan, width, height, &params);
+        }
+        merge_channels(&channels, width, height)
+    }
+}
+
+fn filter_channel(buf: &mut Vec<f32>, width: usize, height: usize, params: &Params) {
     if params.mask_circular {
-        circular_mask(&mut lum, width, height);
+        circular_mask(buf, width, height);
     }
     if params.bilateral_sigma_color > 0.0 && params.bilateral_sigma_space > 0.0 {
-        let filtered = bilateral(
-            &lum,
+        *buf = bilateral(
+            buf,
             width,
             height,
             params.bilateral_sigma_color,
             params.bilateral_sigma_space,
         );
-        lum = filtered;
     }
     if params.clahe_clip > 0.0 && params.clahe_tiles > 0 {
         clahe(
-            &mut lum,
+            buf,
             width,
             height,
             params.clahe_tiles as usize,
@@ -84,7 +102,7 @@ pub fn run(rgba: &[u8], width: usize, height: usize, params: Params) -> Vec<u8> 
     }
     if params.unsharp_amount > 0.0 && params.unsharp_sigma > 0.0 {
         unsharp_mask(
-            &mut lum,
+            buf,
             width,
             height,
             params.unsharp_sigma,
@@ -92,10 +110,34 @@ pub fn run(rgba: &[u8], width: usize, height: usize, params: Params) -> Vec<u8> 
         );
     }
     if (params.gamma - 1.0).abs() > f32::EPSILON {
-        apply_gamma(&mut lum, params.gamma);
+        apply_gamma(buf, params.gamma);
     }
+}
 
-    expand_rgba(&lum, width, height)
+fn split_channels(rgba: &[u8], width: usize, height: usize) -> [Vec<f32>; 3] {
+    let n = width * height;
+    let mut r = Vec::with_capacity(n);
+    let mut g = Vec::with_capacity(n);
+    let mut b = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = i * 4;
+        r.push(rgba[base] as f32 / 255.0);
+        g.push(rgba[base + 1] as f32 / 255.0);
+        b.push(rgba[base + 2] as f32 / 255.0);
+    }
+    [r, g, b]
+}
+
+fn merge_channels(chans: &[Vec<f32>; 3], width: usize, height: usize) -> Vec<u8> {
+    let n = width * height;
+    let mut out = vec![0u8; n * 4];
+    for i in 0..n {
+        out[i * 4] = (chans[0][i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        out[i * 4 + 1] = (chans[1][i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        out[i * 4 + 2] = (chans[2][i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        out[i * 4 + 3] = 255;
+    }
+    out
 }
 
 fn expand_rgba(lum: &[f32], width: usize, height: usize) -> Vec<u8> {
@@ -158,5 +200,22 @@ mod tests {
             assert_eq!(chunk[1], chunk[2], "G != B");
             assert_eq!(chunk[3], 255, "alpha not opaque");
         }
+    }
+
+    #[test]
+    fn color_mode_preserves_channels() {
+        let rgba = solid_rgba(16, 16, 200, 50, 10);
+        let params = Params {
+            grayscale: false,
+            ..Params::default()
+        };
+        let out = run(&rgba, 16, 16, params);
+        // Within a solid block, the channel separation should survive;
+        // unsharp + mask can trim edge pixels, so sample an interior pixel.
+        let base = (8 * 16 + 8) * 4;
+        assert!(out[base] > 150, "R channel crushed: {}", out[base]);
+        assert!(out[base + 1] < 100, "G leaked up: {}", out[base + 1]);
+        assert!(out[base + 2] < 50, "B leaked up: {}", out[base + 2]);
+        assert_eq!(out[base + 3], 255);
     }
 }
