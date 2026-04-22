@@ -15,6 +15,8 @@ import { useSolverStore } from "@/solver/store";
 export function BuildPage() {
   const imageMeta = useImageStore((s) => s.meta);
   const sequence = useSolverStore((s) => s.sequence);
+  const sequenceColors = useSolverStore((s) => s.sequenceColors);
+  const palette = useSolverStore((s) => s.palette);
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const physical = useSolverStore((s) => s.physical);
@@ -29,8 +31,16 @@ export function BuildPage() {
   }, [imageMeta, physical]);
 
   const bom = useMemo(
-    () => computeBom(physical, sequence, pinPositions, imageSize),
-    [physical, sequence, pinPositions, imageSize],
+    () =>
+      computeBom(
+        physical,
+        sequence,
+        pinPositions,
+        imageSize,
+        sequenceColors,
+        palette,
+      ),
+    [physical, sequence, pinPositions, imageSize, sequenceColors, palette],
   );
 
   const loadProgress = useProgressStore((s) => s.load);

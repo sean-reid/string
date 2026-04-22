@@ -10,6 +10,8 @@ export function Printables() {
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const sequence = useSolverStore((s) => s.sequence);
+  const sequenceColors = useSolverStore((s) => s.sequenceColors);
+  const palette = useSolverStore((s) => s.palette);
   const disabled = !pinPositions || imageSize <= 0 || sequence.length < 2;
 
   const [status, setStatus] = useState<string | null>(null);
@@ -96,6 +98,8 @@ export function Printables() {
                 if (sequence.length < 2) throw new Error("no sequence");
                 return buildBookletPdf({
                   sequence,
+                  sequenceColors,
+                  palette,
                   pinCount: physical.pinCount,
                   diameterMm: board.diameterMm,
                   threadLabel: thread.label,
