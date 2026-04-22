@@ -4,7 +4,7 @@ pub mod preprocess;
 pub mod solver;
 
 use preprocess::Params;
-use solver::{weight::FaceBox, Solver as GreedySolver, SolverConfig};
+use solver::{palette::Palette, weight::FaceBox, Solver as GreedySolver, SolverConfig};
 
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
@@ -149,13 +149,18 @@ pub struct Solver {
 
 #[wasm_bindgen]
 impl Solver {
+    /// `palette_srgb` is a flat buffer of sRGB bytes, length `N * 3`, one
+    /// thread color per entry. PR 2 only accepts `N == 1`; multi-color
+    /// palettes land in PR 3.
     #[wasm_bindgen(constructor)]
     pub fn new(
         preprocessed_rgba: &[u8],
         size: u32,
         params: SolverParams,
+        palette_srgb: &[u8],
         seed: u64,
     ) -> Result<Solver, JsValue> {
+        let palette = Palette::from_srgb_bytes(palette_srgb).map_err(JsValue::from_str)?;
         let face = if params.face_w > 0.0 && params.face_h > 0.0 {
             Some(FaceBox {
                 x: params.face_x,
@@ -170,6 +175,7 @@ impl Solver {
             preprocessed_rgba,
             size as usize,
             params.into(),
+            palette,
             seed,
             face,
             params.face_emphasis,
@@ -183,6 +189,19 @@ impl Solver {
     #[wasm_bindgen(js_name = stepMany)]
     pub fn step_many(&mut self, max: u32) -> Vec<u16> {
         self.inner.step_many(max)
+    }
+
+    /// Palette index assigned to each pin from the most recent `step_many`
+    /// call, in matching order. Always all zeros while the solver is in
+    /// mono mode.
+    #[wasm_bindgen(js_name = lastBatchColors)]
+    pub fn last_batch_colors(&self) -> Vec<u8> {
+        self.inner.last_batch_colors()
+    }
+
+    #[wasm_bindgen(js_name = paletteSize)]
+    pub fn palette_size(&self) -> u8 {
+        self.inner.palette_size()
     }
 
     #[wasm_bindgen(js_name = isDone)]
