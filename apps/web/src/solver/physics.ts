@@ -55,8 +55,6 @@ export const BOARDS: Record<BoardId, BoardSpec> = {
 /** Internal solver resolution. The preprocessor crops to this size. */
 export const SOLVE_RESOLUTION_PX = 700;
 
-export type PaletteMode = "auto" | "manual";
-
 export const MAX_PALETTE_SIZE = 6;
 
 export interface PhysicalParams {
@@ -64,18 +62,12 @@ export interface PhysicalParams {
   threadId: ThreadId;
   pinCount: number;
   lineBudget: number;
-  /** Minimum chord length as a fraction of the board diameter. */
+  /** Minimum chord length as a fraction of the board diameter. Kept
+   *  internal — no user-facing slider; default value drives the solver. */
   minChordPct: number;
-  /** How palette colors are picked:
-   *  - "auto": k-means on the source image, `paletteCount` colors out
-   *  - "manual": the user provides `palette` directly */
-  paletteMode: PaletteMode;
-  /** Requested palette size (1..=MAX_PALETTE_SIZE). Only consulted in
-   *  "auto" mode; manual palettes use `palette.length`. */
-  paletteCount: number;
-  /** sRGB hex strings. In auto mode this is the last extracted palette
-   *  and serves as a preview until the next solve; in manual mode it is
-   *  the authoritative set of thread colors. */
+  /** sRGB hex strings. The authoritative set of thread colors the
+   *  solver will run with. Users edit this directly via the palette
+   *  picker (add / edit / remove swatches). */
   palette: string[];
 }
 
@@ -88,8 +80,6 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   // algorithm uses ~4000 chords on a 300-pin board; we mirror that.
   lineBudget: 4000,
   minChordPct: 0.2,
-  paletteMode: "auto",
-  paletteCount: 1,
   palette: [DEFAULT_THREAD_COLOR],
 };
 

@@ -133,11 +133,17 @@ enum SolverState {
 }
 
 /// Scoring weight on the luminance residual relative to the per-thread
-/// density residual. `1.0` gives equal-weight sums; `0.5` keeps density
-/// dominant in well-decomposed regions (face, objects with a clear
-/// hue) while still letting luminance take over where density is
-/// near-zero (dim background, shadows).
-const LUMINANCE_SCORE_WEIGHT: f32 = 0.5;
+/// density residual. Zero disables the luminance term entirely —
+/// scoring is purely "does this thread's density field need reducing
+/// along this chord?" Without zeroing, the luminance term biases every
+/// score by `thread_luminance[i]`, and in the Vrellis paradigm
+/// thread_luminance is max for pure black — so any palette with black
+/// in it gets its score function rigged against the colored threads
+/// regardless of per-thread density. Density alone is the right
+/// signal: the NNLS decomposition already tells each thread which
+/// pixels it's supposed to darken, and greedy-on-density picks the
+/// right color at the right place.
+const LUMINANCE_SCORE_WEIGHT: f32 = 0.0;
 
 /// Rec.709 luminance coefficients. Used in multiple places — score
 /// weighting, target-luminance init, thread_luminance precompute.

@@ -1,7 +1,6 @@
 import { useCallback } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
-import { useViewStore } from "@/solver/view-store";
 import {
   BOARDS,
   THREADS,
@@ -24,7 +23,6 @@ export interface ExportActions {
 }
 
 export function useExports(): ExportActions {
-  const bitmap = useImageStore((s) => s.bitmap);
   const imageMeta = useImageStore((s) => s.meta);
   const sequence = useSolverStore((s) => s.sequence);
   const sequenceColors = useSolverStore((s) => s.sequenceColors);
@@ -33,7 +31,6 @@ export function useExports(): ExportActions {
   const imageSize = useSolverStore((s) => s.imageSize);
   const physical = useSolverStore((s) => s.physical);
   const solverStatus = useSolverStore((s) => s.status);
-  const showSource = useViewStore((s) => s.showSource);
 
   const available =
     solverStatus !== "idle" &&
@@ -54,8 +51,6 @@ export function useExports(): ExportActions {
     async (scale: 1 | 2 | 4) => {
       if (!available || !pinPositions) return;
       const blob = await renderPng({
-        bitmap,
-        showSource,
         sequence,
         sequenceColors,
         palette,
@@ -69,8 +64,6 @@ export function useExports(): ExportActions {
     },
     [
       available,
-      bitmap,
-      showSource,
       sequence,
       sequenceColors,
       palette,
@@ -92,7 +85,7 @@ export function useExports(): ExportActions {
       diameterMm: board.diameterMm,
       lineOpacity,
       lineWidthMm: thread.diameterMm,
-      backgroundColor: "#0E0D0B",
+      backgroundColor: "#F4EFE5",
       pinCount: physical.pinCount,
     });
     const blob = new Blob([content], { type: "image/svg+xml;charset=utf-8" });

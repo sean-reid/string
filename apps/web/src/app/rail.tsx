@@ -1,7 +1,6 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useState } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
-import { useViewStore } from "@/solver/view-store";
 import { ExportPanel } from "@/export/export-panel";
 import {
   BOARDS,
@@ -13,28 +12,16 @@ import {
   minSkipPins,
   threadCoverage,
   type BoardId,
-  type PaletteMode,
-  type ThreadId,
 } from "@/solver/physics";
 import { Segmented } from "@/components/segmented";
 import { Slider } from "@/components/slider";
+import { ColorPicker } from "@/components/color-picker";
 
 const BOARD_OPTIONS: Array<{ value: BoardId; label: string }> = [
   { value: "b12", label: "12 in" },
   { value: "b16", label: "16 in" },
   { value: "b20", label: "20 in" },
   { value: "b24", label: "24 in" },
-];
-
-const THREAD_OPTIONS: Array<{ value: ThreadId; label: string }> = [
-  { value: "polyester", label: "Polyester" },
-  { value: "dmcFloss", label: "Embroidery" },
-  { value: "crochetCotton", label: "Cotton #10" },
-];
-
-const PALETTE_MODE_OPTIONS: Array<{ value: PaletteMode; label: string }> = [
-  { value: "auto", label: "Auto" },
-  { value: "manual", label: "Manual" },
 ];
 
 export function ParameterRail() {
@@ -46,8 +33,6 @@ export function ParameterRail() {
   const lineBudget = useSolverStore((s) => s.lineBudget);
   const start = useSolverStore((s) => s.start);
   const cancel = useSolverStore((s) => s.cancel);
-  const showSource = useViewStore((s) => s.showSource);
-  const toggleSource = useViewStore((s) => s.toggleSource);
   const resetImage = useImageStore((s) => s.reset);
   const resetSolver = useSolverStore((s) => s.reset);
 
@@ -111,13 +96,6 @@ export function ParameterRail() {
             options={BOARD_OPTIONS}
             disabled={running}
           />
-          <Segmented
-            label="Thread type"
-            value={physical.threadId}
-            onChange={(v) => setPhysical({ threadId: v })}
-            options={THREAD_OPTIONS}
-            disabled={running}
-          />
           <PalettePicker disabled={running} />
 
           <Slider
@@ -138,16 +116,6 @@ export function ParameterRail() {
             value={physical.lineBudget}
             onChange={(v) => setPhysical({ lineBudget: v })}
             suffix={`${physical.lineBudget.toLocaleString()}`}
-            disabled={running}
-          />
-          <Slider
-            label="Min chord"
-            min={0.05}
-            max={0.5}
-            step={0.01}
-            value={physical.minChordPct}
-            onChange={(v) => setPhysical({ minChordPct: v })}
-            suffix={`${Math.round(physical.minChordPct * 100)}%`}
             disabled={running}
           />
 
@@ -186,16 +154,6 @@ export function ParameterRail() {
             >
               New image
             </button>
-            <label className="mt-1 flex items-center justify-between text-sm text-muted">
-              <span>Show source</span>
-              <input
-                type="checkbox"
-                checked={showSource}
-                onChange={toggleSource}
-                className="h-4 w-4 cursor-pointer accent-ink"
-                aria-label="Show source image underlay"
-              />
-            </label>
             {running && (
               <p className="font-mono text-xs tabular-nums text-muted">
                 {linesDrawn.toLocaleString()} /{" "}
@@ -224,65 +182,63 @@ export function ParameterRail() {
   );
 }
 
+/**
+ * Palette editor. Each color is a swatch with an X in its top-right
+ * corner that removes it from the palette; clicking the body opens a
+ * stylized color picker to edit it. After the last swatch a dotted "+"
+ * box adds a new color — auto-seeded to whatever the most recent solve
+ * suggested (or black if no suggestion is known). Up to
+ * MAX_PALETTE_SIZE total.
+ */
 function PalettePicker({ disabled }: { disabled: boolean }) {
   const physical = useSolverStore((s) => s.physical);
   const setPhysical = useSolverStore((s) => s.setPhysical);
   const storePalette = useSolverStore((s) => s.palette);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
-  // A persisted session that predates the palette picker can have
-  // paletteMode / paletteCount missing. Treat that as "auto" with the
-  // current palette length so the picker still renders and the user
-  // can adjust. The migration in solver/store.ts fills these in on next
-  // load, but the guard keeps the UI from vanishing on the first render
-  // of an in-flight rehydrate.
-  const mode: PaletteMode = physical.paletteMode ?? "auto";
-  const paletteCount =
-    physical.paletteCount ?? Math.max(1, physical.palette?.length ?? 1);
-  const previewPalette =
-    mode === "auto" ? storePalette : physical.palette;
-  const count =
-    mode === "auto"
-      ? paletteCount
-      : Math.max(
-          1,
-          Math.min(physical.palette?.length ?? paletteCount, MAX_PALETTE_SIZE),
-        );
+  const palette = physical.palette?.length
+    ? physical.palette
+    : [defaultSwatch()];
 
-  const setMode = (next: PaletteMode) => {
-    if (next === mode) return;
-    if (next === "manual") {
-      // Seed manual from whatever palette we last had so the user starts
-      // with a reasonable row instead of an empty one.
-      const seed =
-        storePalette.length >= paletteCount
-          ? storePalette.slice(0, paletteCount)
-          : ensureLength(
-              storePalette.length ? storePalette : [defaultSwatch()],
-              paletteCount,
-            );
-      setPhysical({ paletteMode: "manual", palette: seed, paletteCount });
-    } else {
-      setPhysical({ paletteMode: "auto", paletteCount });
-    }
-  };
-
-  const setCount = (next: number) => {
-    const clamped = Math.max(1, Math.min(next, MAX_PALETTE_SIZE));
-    if (mode === "auto") {
-      setPhysical({ paletteCount: clamped });
-    } else {
-      const current = physical.palette;
-      const resized = ensureLength(current, clamped);
-      setPhysical({ palette: resized, paletteCount: clamped });
-    }
-  };
-
-  const updateSwatch = (index: number, hex: string) => {
-    if (mode !== "manual") return;
-    const next = (physical.palette ?? []).slice();
+  const updateAt = (index: number, hex: string) => {
+    const next = palette.slice();
     next[index] = hex;
     setPhysical({ palette: next });
   };
+
+  const removeAt = (index: number) => {
+    if (palette.length <= 1) return;
+    const next = palette.slice();
+    next.splice(index, 1);
+    setPhysical({ palette: next });
+  };
+
+  const addSwatch = () => {
+    if (palette.length >= MAX_PALETTE_SIZE) return;
+    // Seed from the last extracted palette if it has a suggestion we
+    // haven't used yet, otherwise fall back to black so the user can
+    // edit from a sensible starting point.
+    const unused = storePalette.find((hex) => !palette.includes(hex));
+    const seed = unused ?? defaultSwatch();
+    const next = [...palette, seed];
+    setPhysical({ palette: next });
+  };
+
+  const autoPickAll = () => {
+    // Overwrite the whole palette with the image's extracted
+    // suggestions. The suggestions list is sized to MAX_PALETTE_SIZE
+    // and ordered dark → light. Taking the first min(current, N)
+    // replaces the current set in-place; if the user had a longer
+    // palette than the suggestion pool, keep the existing count by
+    // padding the tail with black (editable).
+    if (storePalette.length === 0) return;
+    const n = Math.max(1, Math.min(palette.length, MAX_PALETTE_SIZE));
+    const take = storePalette.slice(0, n);
+    while (take.length < n) take.push(defaultSwatch());
+    setPhysical({ palette: take });
+  };
+
+  const canAutoPick = storePalette.length > 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -290,106 +246,101 @@ function PalettePicker({ disabled }: { disabled: boolean }) {
         <span className="font-mono text-[11px] uppercase tracking-wide text-muted">
           Colors
         </span>
-        <span className="font-mono text-[11px] tabular-nums text-muted">
-          {count} of {MAX_PALETTE_SIZE}
-        </span>
+        <div className="flex items-baseline gap-3">
+          <button
+            type="button"
+            onClick={autoPickAll}
+            disabled={disabled || !canAutoPick}
+            className="font-mono text-[11px] uppercase tracking-wide text-muted transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Auto-pick
+          </button>
+          <span className="font-mono text-[11px] tabular-nums text-muted">
+            {palette.length} of {MAX_PALETTE_SIZE}
+          </span>
+        </div>
       </div>
-      <Segmented
-        label="Palette mode"
-        hideLabel
-        value={mode}
-        onChange={setMode}
-        options={PALETTE_MODE_OPTIONS}
+      <div className="relative">
+        <div className="flex flex-wrap items-center gap-2">
+          {palette.map((hex, idx) => (
+            <SwatchButton
+              key={idx}
+              hex={hex}
+              index={idx}
+              canRemove={palette.length > 1}
+              disabled={disabled}
+              onOpen={() => setEditingIndex(idx)}
+              onRemove={() => {
+                removeAt(idx);
+                if (editingIndex === idx) setEditingIndex(null);
+              }}
+            />
+          ))}
+          {palette.length < MAX_PALETTE_SIZE && (
+            <button
+              type="button"
+              onClick={addSwatch}
+              disabled={disabled}
+              aria-label="Add thread color"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-dashed border-line text-muted transition hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span aria-hidden="true" className="text-lg leading-none">
+                +
+              </span>
+            </button>
+          )}
+        </div>
+        {editingIndex !== null && !disabled && palette[editingIndex] && (
+          <ColorPicker
+            value={palette[editingIndex]!}
+            onChange={(h) => updateAt(editingIndex, h)}
+            onClose={() => setEditingIndex(null)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SwatchButton({
+  hex,
+  index,
+  canRemove,
+  disabled,
+  onOpen,
+  onRemove,
+}: {
+  hex: string;
+  index: number;
+  canRemove: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onOpen}
         disabled={disabled}
+        aria-label={`Edit thread color ${index + 1}: ${hex}`}
+        className="h-9 w-9 rounded-md border border-line shadow-sm transition hover:border-ink disabled:cursor-not-allowed disabled:opacity-50"
+        style={{ background: hex }}
       />
-      <Slider
-        label={mode === "auto" ? "Palette size" : "Swatches"}
-        min={1}
-        max={MAX_PALETTE_SIZE}
-        step={1}
-        value={count}
-        onChange={setCount}
-        suffix={`${count}`}
-        disabled={disabled}
-      />
-      <SwatchRow
-        mode={mode}
-        palette={previewPalette}
-        count={count}
-        onSwatchChange={updateSwatch}
-        disabled={disabled}
-      />
-      {mode === "auto" ? (
-        <p className="text-[11px] text-muted">
-          Palette is derived from the image with k-means each time you
-          generate. Hit Generate to refresh the preview.
-        </p>
-      ) : (
-        <p className="text-[11px] text-muted">
-          Pick the exact thread colors you own. Tap a swatch to edit.
-        </p>
+      {canRemove && !disabled && (
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`Remove thread color ${index + 1}`}
+          className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-line bg-surface text-[10px] leading-none text-muted shadow-sm transition hover:border-ink hover:bg-ink hover:text-paper"
+        >
+          ×
+        </button>
       )}
     </div>
   );
 }
 
-function SwatchRow({
-  mode,
-  palette,
-  count,
-  onSwatchChange,
-  disabled,
-}: {
-  mode: PaletteMode;
-  palette: readonly string[];
-  count: number;
-  onSwatchChange: (index: number, hex: string) => void;
-  disabled: boolean;
-}) {
-  const entries = ensureLength(palette.length ? palette : [defaultSwatch()], count);
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {entries.map((hex, idx) => {
-        if (mode === "manual") {
-          return (
-            <label
-              key={idx}
-              className="relative h-7 w-7 overflow-hidden rounded-md border border-line"
-              style={{ background: hex }}
-              title={hex}
-            >
-              <input
-                type="color"
-                value={hex}
-                onChange={(e) => onSwatchChange(idx, e.target.value)}
-                disabled={disabled}
-                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                aria-label={`Swatch ${idx + 1}: ${hex}`}
-              />
-            </label>
-          );
-        }
-        return (
-          <span
-            key={idx}
-            aria-label={`Auto swatch ${idx + 1}: ${hex}`}
-            title={hex}
-            className="h-7 w-7 rounded-md border border-line"
-            style={{ background: hex }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
 function defaultSwatch(): string {
-  return "#f4efe5";
-}
-
-function ensureLength(palette: readonly string[], length: number): string[] {
-  if (palette.length === length) return palette.slice();
-  if (palette.length > length) return palette.slice(0, length);
-  const fill = palette.length > 0 ? palette[palette.length - 1]! : defaultSwatch();
-  return [...palette, ...Array.from({ length: length - palette.length }, () => fill)];
+  return "#111111";
 }

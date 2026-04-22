@@ -1,18 +1,14 @@
 import { useEffect, useRef } from "react";
-import { useImageStore } from "@/image/store";
-import { useViewStore } from "@/solver/view-store";
 
-const UNDERLAY_OPACITY = 0.2;
 const DISPLAY_CAP = 1024;
 
 /**
- * Bottom layer of the loom. Only paints the preprocessed image under a
- * circular mask. Independent of the solver state so toggling Show Source
- * never touches the thread layer.
+ * Bottom layer of the loom: the bare cream fabric board that threads
+ * subtract light from. Source-image overlay was dropped — users can
+ * always flip back to the image page to see the source; the loom
+ * preview is for the string-art rendering itself.
  */
 export function UnderlayCanvas() {
-  const bitmap = useImageStore((s) => s.bitmap);
-  const showSource = useViewStore((s) => s.showSource);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -43,16 +39,8 @@ export function UnderlayCanvas() {
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
     ctx.clip();
 
-    // Board color — cream fabric. Vrellis paradigm: bright canvas,
-    // dark threads that subtract light via occlusion.
     ctx.fillStyle = "#F4EFE5";
     ctx.fillRect(0, 0, size, size);
-
-    if (bitmap && showSource) {
-      ctx.globalAlpha = UNDERLAY_OPACITY;
-      ctx.drawImage(bitmap, 0, 0, size, size);
-      ctx.globalAlpha = 1;
-    }
     ctx.restore();
 
     ctx.strokeStyle = "#141311";
@@ -61,7 +49,7 @@ export function UnderlayCanvas() {
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
-  }, [bitmap, showSource]);
+  }, []);
 
   return (
     <canvas
