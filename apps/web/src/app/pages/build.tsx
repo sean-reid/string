@@ -125,6 +125,8 @@ export function BuildPage() {
               imageSize={imageSize}
               pinCount={physical.pinCount}
               sequence={sequence}
+              sequenceColors={sequenceColors}
+              palette={palette}
               currentStep={currentStep}
             />
           </div>
