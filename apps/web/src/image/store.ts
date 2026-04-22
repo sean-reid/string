@@ -11,6 +11,10 @@ interface ImageState {
   status: ImageStatus;
   errorMessage: string | null;
   bitmap: ImageBitmap | null;
+  /** Pristine color-cropped RGBA, pre-preprocess. Used as the source for
+   *  palette extraction and color-mode solves; in-memory only, does not
+   *  persist across reloads. */
+  colorRgba: Uint8Array | null;
   meta: ImageMetadata | null;
   ingest: (blob: Blob, opts?: { filename?: string }) => Promise<void>;
   /** Re-decode from IndexedDB after a page reload. */
@@ -24,6 +28,7 @@ export const useImageStore = create<ImageState>()(
       status: "idle",
       errorMessage: null,
       bitmap: null,
+      colorRgba: null,
       meta: null,
 
       async ingest(blob, opts) {
@@ -33,6 +38,7 @@ export const useImageStore = create<ImageState>()(
           status: "decoding",
           errorMessage: null,
           bitmap: null,
+          colorRgba: null,
           meta: null,
         });
         try {
@@ -44,6 +50,7 @@ export const useImageStore = create<ImageState>()(
           set({
             status: "ready",
             bitmap: decoded.bitmap,
+            colorRgba: decoded.colorRgba,
             meta: decoded.meta,
           });
           // Cache the source blob by content hash so we can rehydrate after
@@ -70,6 +77,7 @@ export const useImageStore = create<ImageState>()(
           set({
             status: "ready",
             bitmap: decoded.bitmap,
+            colorRgba: decoded.colorRgba,
             meta: decoded.meta,
           });
         } catch {
@@ -85,6 +93,7 @@ export const useImageStore = create<ImageState>()(
           status: "idle",
           errorMessage: null,
           bitmap: null,
+          colorRgba: null,
           meta: null,
         });
         void clearCachedBlobs();

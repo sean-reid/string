@@ -4,6 +4,7 @@ import { useImageStore } from "@/image/store";
 import {
   DEFAULT_PHYSICAL,
   paletteToSrgbBytes,
+  srgbBytesToHex,
   type PhysicalParams,
   deriveSolverParams,
 } from "./physics";
@@ -88,7 +89,12 @@ const baseStoreFactory = (
 
   async start() {
     const image = useImageStore.getState();
-    if (image.status !== "ready" || !image.bitmap || !image.meta) {
+    if (
+      image.status !== "ready" ||
+      !image.bitmap ||
+      !image.meta ||
+      !image.colorRgba
+    ) {
       set({ status: "error", errorMessage: "Load an image first." });
       return;
     }
@@ -108,20 +114,35 @@ const baseStoreFactory = (
     });
 
     try {
-      const canvas = new OffscreenCanvas(image.meta.size, image.meta.size);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("OffscreenCanvas 2D context not available.");
-      ctx.drawImage(image.bitmap, 0, 0);
-      const data = ctx.getImageData(0, 0, image.meta.size, image.meta.size);
-      const rgba = new Uint8Array(
-        data.data.buffer,
-        data.data.byteOffset,
-        data.data.byteLength,
-      );
-
       const physical = get().physical;
-      const raw = deriveSolverParams(physical);
       const remote = getSolverWorker();
+
+      // Resolve the palette before preprocessing so we know which mode
+      // (grayscale vs color-per-channel) the solver expects.
+      let palette = [...physical.palette];
+      if (physical.paletteMode === "auto") {
+        const requested = Math.max(1, Math.min(physical.paletteCount, 6));
+        const bytes = await remote.extractPalette(
+          new Uint8Array(image.colorRgba),
+          image.meta.size,
+          requested,
+          get().seed,
+        );
+        if (get().generationId !== generationId) return;
+        palette = srgbBytesToHex(bytes);
+        useSolverStore.setState((prev) => ({
+          physical: { ...prev.physical, palette },
+        }));
+      }
+
+      const processed = await remote.preprocess(
+        new Uint8Array(image.colorRgba),
+        image.meta.size,
+        palette.length === 1,
+      );
+      if (get().generationId !== generationId) return;
+
+      const raw = deriveSolverParams(physical);
       const face = image.meta.faceBox;
       const extras: SolverInitExtras = {
         faceX: face?.x ?? 0,
@@ -129,10 +150,10 @@ const baseStoreFactory = (
         faceW: face?.w ?? 0,
         faceH: face?.h ?? 0,
         faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
-        paletteSrgb: paletteToSrgbBytes(physical.palette),
+        paletteSrgb: paletteToSrgbBytes(palette),
       };
       const init = await remote.init(
-        rgba,
+        processed,
         image.meta.size,
         raw,
         get().seed,
@@ -140,7 +161,7 @@ const baseStoreFactory = (
       );
       if (get().generationId !== generationId) return;
       set({
-        palette: [...physical.palette],
+        palette,
         pinPositions: init.pinPositions,
         pinCount: init.pinCount,
         lineBudget: init.lineBudget,

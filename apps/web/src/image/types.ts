@@ -30,8 +30,12 @@ export interface ImageMetadata {
 }
 
 export interface DecodedImage {
-  /** Preprocessed square bitmap, ready to render and to feed the solver. */
+  /** Preprocessed square bitmap, ready to render in the compose preview. */
   bitmap: ImageBitmap;
+  /** Raw square-cropped RGBA (pre-preprocess, original colors). Used by
+   *  palette extraction and color-mode solves; mono solves still pipe the
+   *  grayscale bitmap into the solver. Length is `size * size * 4`. */
+  colorRgba: Uint8Array;
   meta: ImageMetadata;
 }
 

@@ -78,6 +78,33 @@ const api: SolverWorkerApi = {
     );
   },
 
+  async extractPalette(
+    rgba: Uint8Array,
+    size: number,
+    k: number,
+    seed: bigint,
+  ): Promise<Uint8Array> {
+    const solver = await getSolver();
+    const bytes = solver.extractPalette(rgba, size, k, seed);
+    const copy = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    return Comlink.transfer(copy, [copy.buffer]);
+  },
+
+  async preprocess(
+    rgba: Uint8Array,
+    size: number,
+    grayscale: boolean,
+  ): Promise<Uint8Array> {
+    const solver = await getSolver();
+    const params = new solver.PreprocessParams();
+    params.grayscale = grayscale;
+    const out = solver.preprocess(rgba, size, size, params);
+    const copy = new Uint8Array(out.length);
+    copy.set(out);
+    return Comlink.transfer(copy, [copy.buffer]);
+  },
+
   async dispose(): Promise<void> {
     instance?.free();
     instance = null;

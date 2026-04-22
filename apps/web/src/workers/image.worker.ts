@@ -195,6 +195,12 @@ const api: ImageWorkerApi = {
       rgba.data.byteOffset,
       rgba.data.byteLength,
     );
+    // Keep a pristine copy of the color crop for palette extraction and
+    // color-mode solves. The rgbaView below is mutated/consumed by the
+    // grayscale preprocess call.
+    const colorRgba = new Uint8Array(rgbaView.length);
+    colorRgba.set(rgbaView);
+
     const processed = solver.preprocess(rgbaView, size, size, params);
 
     const copy = new Uint8ClampedArray(processed.byteLength);
@@ -215,8 +221,8 @@ const api: ImageWorkerApi = {
       faceDetected: faceResult.detected,
     };
 
-    const result: DecodedImage = { bitmap, meta };
-    return Comlink.transfer(result, [bitmap]);
+    const result: DecodedImage = { bitmap, colorRgba, meta };
+    return Comlink.transfer(result, [bitmap, colorRgba.buffer]);
   },
 };
 

@@ -5,8 +5,14 @@ interface Props {
   imageSize: number;
   pinCount: number;
   sequence: readonly number[];
+  /** Palette index per entry in `sequence`. Same length; optional so
+   *  existing callers that have not wired it up keep rendering in mono. */
+  sequenceColors?: readonly number[];
+  palette?: readonly string[];
   currentStep: number;
 }
+
+const DEFAULT_ACCENT = "#D4541F";
 
 const LABEL_EVERY = 20;
 const STROKE_BATCH = 18;
@@ -21,12 +27,33 @@ export function LoomSvg({
   imageSize,
   pinCount,
   sequence,
+  sequenceColors,
+  palette,
   currentStep,
 }: Props) {
-  const paths = useMemo(() => {
-    if (!pinPositions || imageSize <= 0) return [] as string[];
-    const batches: string[] = [];
+  const multiColor = (palette?.length ?? 1) > 1;
+  const upcomingColor =
+    multiColor && palette && sequenceColors
+      ? (palette[sequenceColors[currentStep + 1] ?? 0] ?? DEFAULT_ACCENT)
+      : DEFAULT_ACCENT;
+  const paletteResolved = palette && palette.length > 0 ? palette : ["#f4efe5"];
+  const batches = useMemo(() => {
+    if (!pinPositions || imageSize <= 0)
+      return [] as Array<{ d: string; color: string }>;
+    const out: Array<{ d: string; color: string }> = [];
     let current = "";
+    let currentColor = -1;
+    let lengthInRun = 0;
+    const flush = () => {
+      if (current) {
+        out.push({
+          d: current,
+          color: paletteResolved[currentColor] ?? "#f4efe5",
+        });
+        current = "";
+        lengthInRun = 0;
+      }
+    };
     for (let i = 1; i <= currentStep; i++) {
       const from = sequence[i - 1];
       const to = sequence[i];
@@ -42,15 +69,20 @@ export function LoomSvg({
         ty === undefined
       )
         continue;
+      const color = sequenceColors?.[i] ?? 0;
+      if (color !== currentColor) {
+        flush();
+        currentColor = color;
+      }
       current += `M${fmt(fx)} ${fmt(fy)}L${fmt(tx)} ${fmt(ty)}`;
-      if (i % STROKE_BATCH === 0) {
-        batches.push(current);
-        current = "";
+      lengthInRun++;
+      if (lengthInRun >= STROKE_BATCH) {
+        flush();
       }
     }
-    if (current) batches.push(current);
-    return batches;
-  }, [pinPositions, imageSize, sequence, currentStep]);
+    flush();
+    return out;
+  }, [pinPositions, imageSize, sequence, sequenceColors, currentStep, paletteResolved]);
 
   if (!pinPositions || imageSize <= 0) {
     return null;
@@ -88,30 +120,33 @@ export function LoomSvg({
         strokeWidth={1}
       />
 
-      {/* Thread — light cream with multiply-on-light behaviour via screen blend */}
+      {/* Thread. Mono uses screen blend so cream accumulates on the dark
+          disc the same way the Compose canvas does; multi-color uses plain
+          source-over so darker threads still render visibly. */}
       <g
-        stroke="#f4efe5"
         strokeOpacity={0.42}
         strokeWidth={0.6}
         strokeLinecap="round"
         fill="none"
-        style={{ mixBlendMode: "screen" }}
+        style={multiColor ? undefined : { mixBlendMode: "screen" }}
       >
-        {paths.map((d, i) => (
-          <path key={i} d={d} />
+        {batches.map((batch, i) => (
+          <path key={i} d={batch.d} stroke={batch.color} />
         ))}
       </g>
 
-      {/* Guide line to next nail, accent */}
+      {/* Guide line to next nail. In mono mode the accent orange is the
+          only distinctive color available; in multi-color solves we use
+          the actual thread color the builder should grab next. */}
       {currentPin !== undefined && nextPin !== undefined ? (
         <line
           x1={pinPositions[currentPin * 2] ?? 0}
           y1={pinPositions[currentPin * 2 + 1] ?? 0}
           x2={pinPositions[nextPin * 2] ?? 0}
           y2={pinPositions[nextPin * 2 + 1] ?? 0}
-          stroke="#D4541F"
-          strokeOpacity={0.75}
-          strokeWidth={1.4}
+          stroke={upcomingColor}
+          strokeOpacity={0.85}
+          strokeWidth={1.6}
           strokeLinecap="round"
         />
       ) : null}
@@ -134,7 +169,7 @@ export function LoomSvg({
                 cy={y}
                 r={9}
                 fill="none"
-                stroke="#D4541F"
+                stroke={upcomingColor}
                 strokeWidth={2}
               >
                 <animate
@@ -152,7 +187,7 @@ export function LoomSvg({
                   repeatCount="indefinite"
                 />
               </circle>
-              <circle cx={x} cy={y} r={4} fill="#D4541F" />
+              <circle cx={x} cy={y} r={4} fill={upcomingColor} />
             </g>
           );
         }

@@ -1,5 +1,8 @@
 interface SegmentedProps<T extends string> {
   label: string;
+  /** When true, the visible label is suppressed but still exposed to AT
+   *  via aria-label on the radiogroup. */
+  hideLabel?: boolean;
   value: T;
   onChange: (value: T) => void;
   options: Array<{ value: T; label: string }>;
@@ -8,6 +11,7 @@ interface SegmentedProps<T extends string> {
 
 export function Segmented<T extends string>({
   label,
+  hideLabel = false,
   value,
   onChange,
   options,
@@ -15,10 +19,10 @@ export function Segmented<T extends string>({
 }: SegmentedProps<T>) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-sm text-ink">{label}</span>
+      {hideLabel ? null : <span className="text-sm text-ink">{label}</span>}
       <div
         role="radiogroup"
-        aria-label={label}
+        aria-label={label || undefined}
         className="inline-flex w-full overflow-hidden rounded-md border border-line bg-surface"
       >
         {options.map((opt) => {
