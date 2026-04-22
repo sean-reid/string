@@ -454,14 +454,26 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
 }
 
 /// Alpha-aware chord score. For each pixel the chord touches we compute
-/// how much closer to the target the alpha deposit
-/// `canvas_new = canvas_old + k · (thread - canvas_old)` would bring
-/// the canvas, where `k = opacity · coverage`. The score is that
-/// improvement per weighted pixel, positive when the thread is brighter
-/// than the current canvas in channels the target still needs; slightly
-/// negative when the thread would overshoot (canvas already at target
-/// and we'd push past). Normalized by weighted coverage so long chords
-/// aren't unfairly favored.
+/// how much the alpha deposit
+/// `canvas_new = canvas_old + k · (thread - canvas_old)` (with
+/// `k = opacity · coverage`) moves the canvas toward the target,
+/// summed over channels. Each channel contribution is clamped at zero:
+/// a chord that would help two channels but overshoot the third no
+/// longer gets penalized by the overshoot channel, it just gets no
+/// credit for it.
+///
+/// This matters for density. The previous formulation used a raw
+/// `<residual, delta>` dot product that could go negative as pixels
+/// overshot in some channels; once enough pixels partially overshot,
+/// most chord options scored zero-or-negative and the solver ran out
+/// of productive chords long before the line budget, leaving the
+/// output visibly sparser than the monochrome solve at the same
+/// budget. Clamping per-channel keeps the pool of useful chords rich
+/// through the whole budget — matching mono's "every chord does
+/// *something* until you run out of lines" behavior.
+///
+/// Score is normalized by weighted coverage so long chords aren't
+/// unfairly favored.
 #[allow(clippy::too_many_arguments)]
 fn score_chord_alpha(
     target: &[f32],
@@ -480,19 +492,14 @@ fn score_chord_alpha(
         let w = weights[idx];
         let k = opacity * cov;
         let base = idx * 3;
-        // Residual (still-needed light) and thread delta from the
-        // current canvas, both in linear RGB.
         let rr = target[base] - canvas[base];
         let rg = target[base + 1] - canvas[base + 1];
         let rb = target[base + 2] - canvas[base + 2];
         let dr = thread[0] - canvas[base];
         let dg = thread[1] - canvas[base + 1];
         let db = thread[2] - canvas[base + 2];
-        // Improvement = (residual . delta) · k. Positive when delta
-        // aligns with residual (bringing the canvas closer to target),
-        // negative when they oppose.
-        let dot = rr * dr + rg * dg + rb * db;
-        sum += dot * k * w;
+        let useful = (rr * dr).max(0.0) + (rg * dg).max(0.0) + (rb * db).max(0.0);
+        sum += useful * k * w;
         weight_sum += cov * w;
     });
     if weight_sum > 0.0 {
