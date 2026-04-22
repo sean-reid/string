@@ -114,8 +114,8 @@ export function ParameterRail() {
           <Slider
             label="Lines"
             min={1000}
-            max={5000}
-            step={50}
+            max={15000}
+            step={100}
             value={physical.lineBudget}
             onChange={(v) => setPhysical({ lineBudget: v })}
             suffix={`${physical.lineBudget.toLocaleString()}`}
