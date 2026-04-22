@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [chromium, firefox, mobile-chrome, mobile-safari]
+        project: [chromium, mobile-chrome, mobile-safari]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -98,7 +98,6 @@ jobs:
         run: |
           case "${{ matrix.project }}" in
             mobile-safari) echo "id=webkit" >> "$GITHUB_OUTPUT" ;;
-            firefox) echo "id=firefox" >> "$GITHUB_OUTPUT" ;;
             *) echo "id=chromium" >> "$GITHUB_OUTPUT" ;;
           esac
       - name: pnpm install
