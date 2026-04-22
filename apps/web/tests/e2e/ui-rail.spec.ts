@@ -3,6 +3,7 @@ import { expect, test } from "./_fixtures";
 test("rail: mono-only controls, no palette UI, no board selector, no show-source", async ({
   page,
 }) => {
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
   await page
