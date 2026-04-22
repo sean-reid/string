@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [chromium, mobile-chrome, mobile-safari]
+        project: [chromium, firefox, mobile-chrome, mobile-safari]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -110,11 +110,12 @@ jobs:
         run: pnpm --filter web build
       - name: install playwright browsers
         run: |
-          if [ "${{ matrix.project }}" = "mobile-safari" ]; then
-            pnpm --filter web exec playwright install --with-deps webkit
-          else
-            pnpm --filter web exec playwright install --with-deps chromium
-          fi
+          case "${{ matrix.project }}" in
+            mobile-safari) browser=webkit ;;
+            firefox) browser=firefox ;;
+            *) browser=chromium ;;
+          esac
+          pnpm --filter web exec playwright install --with-deps "$browser"
       - name: run playwright
         run: pnpm --filter web exec playwright test --project=${{ matrix.project }}
       - name: upload report

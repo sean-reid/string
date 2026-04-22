@@ -24,12 +24,36 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
     {
+      // Gecko coverage. Screenshot/regression specs stay chromium-only —
+      // firefox only needs the interactive paths.
+      name: "firefox",
+      use: { ...devices["Desktop Firefox"] },
+      testIgnore: [
+        "**/density-check.spec.ts",
+        "**/showcase.spec.ts",
+        "**/build-preview.spec.ts",
+      ],
+    },
+    {
+      // Screenshot/regression specs are chromium-only. No cross-browser
+      // signal from re-solving them on WebKit/mobile-chrome, and the
+      // solves dominate wall time on those runners.
       name: "mobile-chrome",
       use: { ...devices["Pixel 7"] },
+      testIgnore: [
+        "**/density-check.spec.ts",
+        "**/showcase.spec.ts",
+        "**/build-preview.spec.ts",
+      ],
     },
     {
       name: "mobile-safari",
       use: { ...devices["iPhone 14"] },
+      testIgnore: [
+        "**/density-check.spec.ts",
+        "**/showcase.spec.ts",
+        "**/build-preview.spec.ts",
+      ],
     },
   ],
   webServer: {
