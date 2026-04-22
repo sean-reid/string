@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { useImageStore } from "@/image/store";
 import {
   DEFAULT_PHYSICAL,
+  DEFAULT_THREAD_COLOR,
   paletteToSrgbBytes,
   srgbBytesToHex,
   type PhysicalParams,
@@ -235,17 +236,40 @@ export const useSolverStore = create<SolverState>()(
       linesDrawn: state.linesDrawn,
       lineBudget: state.lineBudget,
     }),
-    version: 2,
+    version: 3,
     migrate: (persisted, version) => {
       const state = persisted as Partial<SolverState> | undefined;
       if (!state) return state as unknown as SolverState;
+      // v1 → v2: introduce per-line colors + a store palette alongside the
+      // legacy pin sequence.
       if (version < 2) {
         const seq = state.sequence ?? [];
-        return {
-          ...state,
-          sequenceColors: new Array(seq.length).fill(0),
-          palette: ["#f4efe5"],
-        } as SolverState;
+        state.sequenceColors = new Array(seq.length).fill(0);
+        state.palette = [DEFAULT_THREAD_COLOR];
+      }
+      // v2 → v3: palette picker added paletteMode + paletteCount to
+      // PhysicalParams. Older saved sessions are missing those fields, so
+      // the rail's PalettePicker ended up with paletteMode = undefined
+      // and never rendered. Backfill defaults from the persisted palette
+      // (if any) so the user's color choices survive across versions.
+      if (version < 3) {
+        const existing = state.physical as Partial<PhysicalParams> | undefined;
+        const paletteFromPhysical = existing?.palette;
+        const paletteFromRoot = state.palette;
+        const resolvedPalette =
+          paletteFromPhysical && paletteFromPhysical.length > 0
+            ? paletteFromPhysical
+            : paletteFromRoot && paletteFromRoot.length > 0
+              ? paletteFromRoot
+              : [DEFAULT_THREAD_COLOR];
+        state.physical = {
+          ...DEFAULT_PHYSICAL,
+          ...(existing ?? {}),
+          palette: resolvedPalette,
+          paletteMode: existing?.paletteMode ?? DEFAULT_PHYSICAL.paletteMode,
+          paletteCount:
+            existing?.paletteCount ?? Math.max(1, resolvedPalette.length),
+        };
       }
       return state as SolverState;
     },
