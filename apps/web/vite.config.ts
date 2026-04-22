@@ -14,6 +14,22 @@ export default defineConfig({
     topLevelAwait(),
     VitePWA({
       registerType: "autoUpdate",
+      workbox: {
+        // Reject asset-looking URLs from the SPA fallback so a missing
+        // hashed chunk 404s cleanly instead of being served index.html.
+        // Without this, post-deploy a stale SW hands <!doctype html> back
+        // to the JS parser and the browser throws
+        // `SyntaxError: Unexpected token '<'`.
+        navigateFallbackDenylist: [/\.(?:js|mjs|css|wasm|map|json)$/, /^\/assets\//],
+        // Evict outdated precaches on every SW update so a newer deploy
+        // can't read from a prior revision.
+        cleanupOutdatedCaches: true,
+        // Activate the updated SW immediately on next navigation — the
+        // previous install-then-skipWaiting dance left stale clients
+        // serving old chunks for a full refresh cycle.
+        skipWaiting: true,
+        clientsClaim: true,
+      },
       manifest: {
         name: "String",
         short_name: "String",
