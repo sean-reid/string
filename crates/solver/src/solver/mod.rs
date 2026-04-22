@@ -9,27 +9,26 @@
 //! has reached the target. This produces the sharp, dense portrait the
 //! original solver was tuned for.
 //!
-//! **Color** (palette length > 1): partitive (spatial-density) mixing
-//! model. At init each pixel's `target − board` is decomposed into a
-//! non-negative weighted sum of palette-thread contributions via NNLS,
-//! giving a per-thread scalar "density still to deposit" field — one
-//! mono-style residual per thread instead of one 3-channel canvas. A
-//! chord of thread i scores exactly like the mono solver on that
-//! thread's density field; a deposit subtracts `opacity · coverage`
-//! from it, clamped at zero. At every step the solver evaluates every
-//! (pin, thread) pair and picks the chord with the highest density-
-//! reducing score across all of them.
+//! **Color** (palette length > 1): same scalar-luminance greedy as
+//! mono, with a per-chord thread selection on top. Chord scoring
+//! uses one scalar residual ("darkness still needed" in Rec.709 terms)
+//! — identical to mono. Once a chord is chosen, we walk its pixels,
+//! sum the target-minus-board direction along the path, and pick
+//! the palette thread whose darkening direction best aligns with
+//! that average — so a chord through a warm region gets a warm
+//! thread, a chord through hair gets black, etc. Deposit subtracts
+//! `opacity · thread_luminance · coverage` from the scalar residual,
+//! because a darker thread darkens more per crossing than a lighter
+//! one.
 //!
-//! Why partitive and not alpha compositing: physical string art on a
-//! dark board is spatial-frequency mixing. The eye integrates
-//! individual thread crossings over a patch; perceived color is the
-//! local density of each thread color plus whatever bare board shows
-//! through the gaps, not an alpha-composited canvas value at each
-//! pixel. Alpha compositing has a single "pixel is done" bit per
-//! pixel; partitive has a density budget per thread per pixel, so
-//! every color's chords keep earning their way in until their
-//! demanded density is met — same density-builds-naturally behavior
-//! mono gets. No "pixel saturated, score zero" premature stopping.
+//! This follows Petros Vrellis's original algorithm structure
+//! (kmmeerts reference): luminance greedy first, color as a
+//! classification on top, instead of K parallel per-thread
+//! residuals. The single-residual structure is what produces sharp
+//! feature recognition and avoids moiré — the scoring signal is
+//! unambiguous, every chord has exactly one "value", and near-ties
+//! that would otherwise fragment into parallel-chord bundles don't
+//! happen.
 //!
 //! Regrouping for the physical build is done post-hoc in the UI so
 //! the builder still switches spools rarely.
@@ -95,58 +94,39 @@ impl Default for SolverConfig {
     }
 }
 
-/// Mode-specific solver state. Mono keeps the legacy scalar residual;
-/// Color carries one scalar density residual per palette thread
-/// (partitive mixing — each pixel's target color decomposed into
-/// non-negative combinations of thread densities).
+/// Mode-specific solver state. Both modes use a scalar luminance
+/// residual for chord selection — one unambiguous signal, no
+/// per-thread complications. Color adds a target buffer so each
+/// selected chord can be tinted to the nearest palette hue.
 enum SolverState {
     Mono {
-        /// Scalar "brightness still needed", length width * height.
+        /// Scalar "darkness still needed", length width * height.
         residual: Vec<f32>,
     },
     Color {
-        /// One density residual per palette thread, each of length
-        /// `pixel_count`. `density[i][p]` is the remaining thread-i
-        /// coverage still to be laid at pixel p; chord deposits
-        /// subtract `opacity · coverage` from it, clamped at zero.
-        density: Vec<Vec<f32>>,
-        /// Shared scalar luminance residual, length `pixel_count`.
-        /// Parallel to `density` but tracks "brightness still needed"
-        /// regardless of thread color. Any chord of any thread gets
-        /// partial score credit for depositing luminance here, so dim
-        /// pixels at the periphery (where NNLS decomposition gives
-        /// near-zero density to every thread) still attract chords.
-        /// Without this, mono is denser than color at dim regions
-        /// because mono's one residual never zeros out on faint
-        /// pixels while color's per-thread densities do.
-        luminance: Vec<f32>,
-        /// Rec.709 luminance of each palette thread minus board.
-        /// Precomputed once; weights the luminance term in scoring
-        /// and deposit so brighter threads get more luminance credit
-        /// per chord.
+        /// Scalar "darkness still needed" — identical shape and role
+        /// to mono's residual. Chord selection is driven purely by
+        /// this; color comes in after the chord is chosen.
+        residual: Vec<f32>,
+        /// Target `board − image` color per pixel, interleaved RGB in
+        /// linear light. Used by `pick_chord_color` to compute the
+        /// average target hue along a chosen chord, which maps to
+        /// the nearest palette thread.
+        target_offset: Vec<f32>,
+        /// Rec.709 luminance of each palette thread's darkening basis
+        /// (`board − thread_i`). How much darkness one crossing of
+        /// thread i contributes — used to subtract the right amount
+        /// from the scalar residual when a chord deposits.
         thread_luminance: Vec<f32>,
-        /// Alpha-composited preview canvas maintained for display.
-        /// Not used in scoring — that's purely the density + luminance
-        /// residual fields above.
+        /// Darkening basis `(board − thread_i)` in linear RGB, one per
+        /// palette entry. Pre-baked for chord color picking.
+        thread_basis: Vec<[f32; 3]>,
+        /// Alpha-composited preview canvas (display only).
         canvas: Vec<f32>,
     },
 }
 
-/// Scoring weight on the luminance residual relative to the per-thread
-/// density residual. Zero disables the luminance term entirely —
-/// scoring is purely "does this thread's density field need reducing
-/// along this chord?" Without zeroing, the luminance term biases every
-/// score by `thread_luminance[i]`, and in the Vrellis paradigm
-/// thread_luminance is max for pure black — so any palette with black
-/// in it gets its score function rigged against the colored threads
-/// regardless of per-thread density. Density alone is the right
-/// signal: the NNLS decomposition already tells each thread which
-/// pixels it's supposed to darken, and greedy-on-density picks the
-/// right color at the right place.
-const LUMINANCE_SCORE_WEIGHT: f32 = 0.0;
-
-/// Rec.709 luminance coefficients. Used in multiple places — score
-/// weighting, target-luminance init, thread_luminance precompute.
+/// Rec.709 luminance coefficients.
 const REC709_R: f32 = 0.2126;
 const REC709_G: f32 = 0.7152;
 const REC709_B: f32 = 0.0722;
@@ -213,19 +193,14 @@ impl Solver {
                 SolverState::Mono { residual }
             }
             Mode::Color => {
-                // Partitive-mixing init, Vrellis paradigm: dark threads
-                // on a light board. For each pixel we solve a tiny
-                // non-negative least squares problem: decompose
-                // (board − target) as a non-negative combination of
-                // (board − thread_i) vectors. Both sides are positive
-                // because target and threads are both at or below
-                // board brightness. Coefficients ARE the per-thread
-                // densities the solver must eventually lay down at
-                // that pixel. Density fields behave just like mono's
-                // scalar residual — one per thread — so the color
-                // solver is effectively K parallel mono solves coupled
-                // only at chord-selection time.
-                let k = palette.len();
+                // Petros-style init: one scalar luminance residual
+                // (same shape as mono) plus a target-offset buffer
+                // used to pick the right thread color once a chord
+                // has been chosen. Chord selection is pure luminance
+                // greedy; color is a post-selection classification
+                // of the chord's average hue demand. Structurally
+                // identical to Vrellis's original algorithm with
+                // per-chord color tinting on top.
                 let thread_basis: Vec<[f32; 3]> = palette
                     .colors()
                     .iter()
@@ -237,57 +212,27 @@ impl Solver {
                         ]
                     })
                     .collect();
-                // AtA is symmetric k×k, precomputed once for the NNLS
-                // multiplicative update rule.
-                let mut ata = vec![0.0f32; k * k];
-                for i in 0..k {
-                    for j in 0..k {
-                        ata[i * k + j] = thread_basis[i][0] * thread_basis[j][0]
-                            + thread_basis[i][1] * thread_basis[j][1]
-                            + thread_basis[i][2] * thread_basis[j][2];
-                    }
-                }
-
-                // thread_basis[i] = board − thread_i (per channel,
-                // non-negative). Its Rec.709 luminance is how much
-                // darkening one unit of thread-i density provides —
-                // precompute once for score weighting and deposit.
                 let thread_luminance: Vec<f32> = thread_basis
                     .iter()
                     .map(|c| REC709_R * c[0] + REC709_G * c[1] + REC709_B * c[2])
                     .collect();
 
-                let mut density: Vec<Vec<f32>> =
-                    (0..k).map(|_| vec![0.0f32; pixel_count]).collect();
-                let mut luminance = vec![0.0f32; pixel_count];
-                let mut w = vec![0.0f32; k];
-                let mut atb = vec![0.0f32; k];
-                for (pix, bgra) in preprocessed_rgba
-                    .chunks_exact(4)
-                    .enumerate()
-                    .take(pixel_count)
-                {
+                let mut residual = Vec::with_capacity(pixel_count);
+                let mut target_offset = Vec::with_capacity(pixel_count * 3);
+                for bgra in preprocessed_rgba.chunks_exact(4).take(pixel_count) {
                     let tr = srgb_to_linear(bgra[0] as f32 / 255.0);
                     let tg = srgb_to_linear(bgra[1] as f32 / 255.0);
                     let tb = srgb_to_linear(bgra[2] as f32 / 255.0);
-                    // Offset is board − target, so positive for targets
-                    // darker than board (the vast majority of pixels
-                    // in natural images against a cream board).
-                    // Pixels brighter than board clamp to zero — those
-                    // stay bare cream, no thread needed.
-                    let b = [
-                        (BOARD_LINEAR[0] - tr).max(0.0),
-                        (BOARD_LINEAR[1] - tg).max(0.0),
-                        (BOARD_LINEAR[2] - tb).max(0.0),
-                    ];
-                    for (i, basis) in thread_basis.iter().enumerate() {
-                        atb[i] = basis[0] * b[0] + basis[1] * b[1] + basis[2] * b[2];
-                    }
-                    decompose_nnls(&ata, &atb, k, &thread_basis, &b, &mut w);
-                    for (i, field) in density.iter_mut().enumerate() {
-                        field[pix] = w[i];
-                    }
-                    luminance[pix] = REC709_R * b[0] + REC709_G * b[1] + REC709_B * b[2];
+                    // Board − target in linear light, clamped so
+                    // pixels brighter than board contribute nothing
+                    // (they stay bare cream).
+                    let dr = (BOARD_LINEAR[0] - tr).max(0.0);
+                    let dg = (BOARD_LINEAR[1] - tg).max(0.0);
+                    let db = (BOARD_LINEAR[2] - tb).max(0.0);
+                    residual.push(REC709_R * dr + REC709_G * dg + REC709_B * db);
+                    target_offset.push(dr);
+                    target_offset.push(dg);
+                    target_offset.push(db);
                 }
 
                 let mut canvas = Vec::with_capacity(pixel_count * 3);
@@ -297,9 +242,10 @@ impl Solver {
                     canvas.push(BOARD_LINEAR[2]);
                 }
                 SolverState::Color {
-                    density,
-                    luminance,
+                    residual,
+                    target_offset,
                     thread_luminance,
+                    thread_basis,
                     canvas,
                 }
             }
@@ -375,12 +321,12 @@ impl Solver {
         d.min(n - d)
     }
 
-    /// Score every legal (pin, palette-color) candidate. Mono has one
-    /// scalar residual; color has one scalar density residual per
-    /// palette thread. Both reduce to the same per-chord scoring form —
-    /// weighted average residual along the chord — so color mode is
-    /// effectively K parallel mono solves.
-    fn score_candidates(&self) -> Vec<(u16, u8, f32)> {
+    /// Score every legal next-pin candidate. Both mono and color use
+    /// the same scalar-residual scoring: a chord is good if the
+    /// weighted sum of "darkness demand" along its path is large.
+    /// Color's per-chord thread assignment happens AFTER the chord is
+    /// chosen; it doesn't factor into scoring.
+    fn score_candidates(&self) -> Vec<(u16, f32)> {
         let n = self.config.pin_count;
         let (cx, cy) = self.pin_position(self.current);
         let mut out = Vec::new();
@@ -392,51 +338,31 @@ impl Solver {
                 continue;
             }
             let (qx, qy) = self.pin_position(i);
-            match &self.state {
-                SolverState::Mono { residual } => {
-                    let s = score_chord_scalar(
-                        residual,
-                        &self.weights,
-                        self.width,
-                        self.height,
-                        (cx, cy),
-                        (qx, qy),
-                    );
-                    out.push((i, 0u8, s));
-                }
-                SolverState::Color {
-                    density,
-                    luminance,
-                    thread_luminance,
-                    ..
-                } => {
-                    for (c_idx, field) in density.iter().enumerate() {
-                        let s = score_chord_color(
-                            field,
-                            luminance,
-                            &self.weights,
-                            thread_luminance[c_idx],
-                            self.width,
-                            self.height,
-                            (cx, cy),
-                            (qx, qy),
-                        );
-                        out.push((i, c_idx as u8, s));
-                    }
-                }
+            let residual = match &self.state {
+                SolverState::Mono { residual } => residual,
+                SolverState::Color { residual, .. } => residual,
             };
+            let s = score_chord_scalar(
+                residual,
+                &self.weights,
+                self.width,
+                self.height,
+                (cx, cy),
+                (qx, qy),
+            );
+            out.push((i, s));
         }
         out
     }
 
-    fn pick_next(&mut self) -> Option<(u16, u8)> {
+    fn pick_next(&mut self) -> Option<u16> {
         let candidates = self.score_candidates();
         if candidates.is_empty() {
             return None;
         }
 
         let mut best = f32::NEG_INFINITY;
-        for &(_, _, s) in &candidates {
+        for &(_, s) in &candidates {
             if s > best {
                 best = s;
             }
@@ -445,21 +371,19 @@ impl Solver {
         let t = self.temperature().max(1e-6);
         let mut weights: Vec<f32> = candidates
             .iter()
-            .map(|&(_, _, s)| ((s - best) / t).exp())
+            .map(|&(_, s)| ((s - best) / t).exp())
             .collect();
         let sum: f32 = weights.iter().sum();
         if sum <= 0.0 || !sum.is_finite() {
-            // Degenerate: pick argmax.
             let mut idx = 0usize;
             let mut bv = f32::NEG_INFINITY;
-            for (i, &(_, _, s)) in candidates.iter().enumerate() {
+            for (i, &(_, s)) in candidates.iter().enumerate() {
                 if s > bv {
                     bv = s;
                     idx = i;
                 }
             }
-            let (pin, color, _) = candidates[idx];
-            return Some((pin, color));
+            return Some(candidates[idx].0);
         }
         for w in &mut weights {
             *w /= sum;
@@ -470,12 +394,105 @@ impl Solver {
         for (i, &w) in weights.iter().enumerate() {
             acc += w;
             if r <= acc {
-                let (pin, color, _) = candidates[i];
-                return Some((pin, color));
+                return Some(candidates[i].0);
             }
         }
-        let (pin, color, _) = *candidates.last().unwrap();
-        Some((pin, color))
+        Some(candidates.last().unwrap().0)
+    }
+
+    /// For a chord chosen in color mode, pick which palette thread
+    /// to draw it in. Splits the chord's demand into a chromatic
+    /// component (what hue does this region want?) and an achromatic
+    /// component (just uniform darkening?), and routes accordingly:
+    ///
+    /// - If the chromatic ratio is meaningful, match the chromatic
+    ///   sum against each thread's chromatic basis. Colored threads
+    ///   with non-zero chroma compete fairly on hue; black, with
+    ///   near-zero chromatic basis, naturally scores low here.
+    /// - If the chord is essentially uniform-dark, pick the least-
+    ///   chromatic thread (typically black).
+    ///
+    /// This is what lets colored threads win on face regions: black
+    /// loses the chromatic-match test because its darkening basis
+    /// has no direction, only magnitude. A raw `b · basis / |basis|`
+    /// compare would always favor black simply because `b` has a
+    /// uniform-positive component that aligns with black's
+    /// uniform-positive basis.
+    fn pick_chord_color(
+        &self,
+        target_offset: &[f32],
+        thread_basis: &[[f32; 3]],
+        p0: (f32, f32),
+        p1: (f32, f32),
+    ) -> u8 {
+        let mut sum = [0.0f32; 3];
+        chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, self.width, self.height, |idx, c| {
+            let w = self.weights[idx];
+            let cw = c * w;
+            let base = idx * 3;
+            sum[0] += target_offset[base] * cw;
+            sum[1] += target_offset[base + 1] * cw;
+            sum[2] += target_offset[base + 2] * cw;
+        });
+
+        if sum[0] + sum[1] + sum[2] <= 1e-8 {
+            return 0;
+        }
+
+        // Chromatic component of the chord's accumulated demand.
+        let s_min = sum[0].min(sum[1]).min(sum[2]);
+        let chrom = [sum[0] - s_min, sum[1] - s_min, sum[2] - s_min];
+
+        // Match colored threads by chromatic-basis alignment only.
+        // A thread with near-zero chromatic basis (black) drops out
+        // because its bc_mag_sq is tiny; colored threads compete
+        // here on hue match, not on raw magnitude. No gate: any
+        // nonzero positive chromatic alignment is enough to prefer
+        // a colored thread over the achromatic fallback.
+        let mut best_color: Option<(u8, f32)> = None;
+        for (i, basis) in thread_basis.iter().enumerate() {
+            let b_min = basis[0].min(basis[1]).min(basis[2]);
+            let bc = [basis[0] - b_min, basis[1] - b_min, basis[2] - b_min];
+            let bc_mag_sq = bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2];
+            if bc_mag_sq <= 1e-6 {
+                continue;
+            }
+            let dot = chrom[0] * bc[0] + chrom[1] * bc[1] + chrom[2] * bc[2];
+            if dot <= 0.0 {
+                continue;
+            }
+            let aligned = dot / bc_mag_sq.sqrt();
+            match best_color {
+                None => best_color = Some((i as u8, aligned)),
+                Some((_, prev)) if aligned > prev => best_color = Some((i as u8, aligned)),
+                _ => {}
+            }
+        }
+        if let Some((i, _)) = best_color {
+            return i;
+        }
+
+        // Achromatic demand: pick the thread whose basis has the
+        // smallest chromatic component relative to its magnitude —
+        // that's the closest to "pure darkness" in the palette,
+        // which is what a uniform-dark chord needs.
+        let mut best = 0u8;
+        let mut best_chroma_ratio = f32::INFINITY;
+        for (i, basis) in thread_basis.iter().enumerate() {
+            let mag_sq = basis[0] * basis[0] + basis[1] * basis[1] + basis[2] * basis[2];
+            if mag_sq <= 1e-6 {
+                continue;
+            }
+            let b_min = basis[0].min(basis[1]).min(basis[2]);
+            let bc = [basis[0] - b_min, basis[1] - b_min, basis[2] - b_min];
+            let bc_mag_sq = bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2];
+            let ratio = bc_mag_sq / mag_sq;
+            if ratio < best_chroma_ratio {
+                best_chroma_ratio = ratio;
+                best = i as u8;
+            }
+        }
+        best
     }
 
     pub fn step_many(&mut self, max: u32) -> Vec<u16> {
@@ -485,7 +502,7 @@ impl Solver {
             if self.is_done() {
                 break;
             }
-            let Some((next, color_index)) = self.pick_next() else {
+            let Some(next) = self.pick_next() else {
                 break;
             };
             let (cx, cy) = self.pin_position(self.current);
@@ -495,6 +512,18 @@ impl Solver {
                 y0: cy,
                 x1: qx,
                 y1: qy,
+            };
+            // Pick the chord's thread color (color mode only) BEFORE
+            // depositing, so the deposit subtracts this thread's
+            // actual darkening contribution — not a generic
+            // placeholder.
+            let color_index: u8 = match &self.state {
+                SolverState::Mono { .. } => 0,
+                SolverState::Color {
+                    target_offset,
+                    thread_basis,
+                    ..
+                } => self.pick_chord_color(target_offset, thread_basis, (cx, cy), (qx, qy)),
             };
             match &mut self.state {
                 SolverState::Mono { residual } => {
@@ -507,35 +536,29 @@ impl Solver {
                     );
                 }
                 SolverState::Color {
-                    density,
-                    luminance,
+                    residual,
                     thread_luminance,
                     canvas,
+                    ..
                 } => {
+                    // Residual loses this thread's luminance
+                    // contribution per crossing. A low-luminance
+                    // thread (black-on-cream) subtracts a lot per
+                    // crossing; a brighter thread subtracts less,
+                    // needing more crossings to darken the same
+                    // amount. Matches the physical opacity the
+                    // lines-canvas renders.
                     let idx = color_index as usize;
-                    // Density-residual update: thread-i field loses
-                    // `opacity · coverage` at every touched pixel.
                     deposit_mono(
-                        &mut density[idx],
-                        self.width,
-                        self.height,
-                        endpoints,
-                        self.config.opacity,
-                    );
-                    // Luminance-residual update: any thread reduces
-                    // the shared luminance budget proportional to its
-                    // own brightness. `opacity · coverage · thread_lum`
-                    // per pixel, clamped at zero.
-                    deposit_mono(
-                        luminance,
+                        residual,
                         self.width,
                         self.height,
                         endpoints,
                         self.config.opacity * thread_luminance[idx],
                     );
-                    // Preview canvas (display only, not scored on):
-                    // alpha composite so the rendered output matches
-                    // what the builder actually sees as threads stack.
+                    // Preview canvas: alpha composite toward the
+                    // chosen thread color, matching what the
+                    // physical build looks like at this crossing.
                     let thread = self.palette.colors()[idx];
                     deposit_alpha(
                         canvas,
@@ -561,61 +584,11 @@ impl Solver {
     }
 }
 
-/// Color-mode chord score: weighted average along the chord of
-/// `density[pix] + LUMINANCE_SCORE_WEIGHT · thread_lum · luminance[pix]`,
-/// normalized by weighted coverage. Combines the per-thread density
-/// term (primary signal — correct-hue chords for the subject win
-/// cleanly) with a shared luminance term weighted by the thread's own
-/// brightness (secondary signal — lets dim bright threads attract
-/// chords into periphery regions the NNLS decomposition leaves with
-/// near-zero density).
-#[allow(clippy::too_many_arguments)]
-fn score_chord_color(
-    density: &[f32],
-    luminance: &[f32],
-    weights: &[f32],
-    thread_lum: f32,
-    width: usize,
-    height: usize,
-    p0: (f32, f32),
-    p1: (f32, f32),
-) -> f32 {
-    let lum_scale = LUMINANCE_SCORE_WEIGHT * thread_lum;
-    let mut sum = 0.0f32;
-    let mut relevant_weight = 0.0f32;
-    chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, width, height, |idx, c| {
-        // Only count pixels where THIS thread has positive density
-        // demand. In color mode the per-thread density field is
-        // sparse — a warm thread has nonzero density only in pixels
-        // whose decomposition assigned weight to it. Averaging over
-        // the entire chord (including pixels with zero demand) lets
-        // whichever thread has the LARGEST demanding region (black,
-        // usually) win every chord regardless of which subregion the
-        // chord actually passes through, and color threads never get
-        // picked. Restricting the normalization denominator to
-        // relevant pixels fixes that: a chord through a face region
-        // gets credit for the warm thread's demand there, diluted
-        // only by other face-pixel variation, not by bare-board or
-        // shadow-dominated pixels along the same chord path.
-        let signal = density[idx] + lum_scale * luminance[idx];
-        if signal <= 0.0 {
-            return;
-        }
-        let w = weights[idx];
-        let cw = c * w;
-        sum += signal * cw;
-        relevant_weight += cw;
-    });
-    if relevant_weight > 0.0 {
-        sum / relevant_weight
-    } else {
-        0.0
-    }
-}
-
 /// Per-chord score for a scalar residual field: weighted average of
 /// `residual × coverage × weight` along the chord, normalized by
-/// weighted coverage. Used by mono mode only.
+/// weighted coverage. Used by both mono and color modes — color also
+/// scores on a scalar luminance residual, just with extra bookkeeping
+/// to pick a thread color for the winning chord.
 fn score_chord_scalar(
     residual: &[f32],
     weights: &[f32],
@@ -647,160 +620,6 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
     chord::for_each_pixel(e.x0, e.y0, e.x1, e.y1, width, height, |idx, c| {
         residual[idx] = (residual[idx] - opacity * c).max(0.0);
     });
-}
-
-/// Hybrid decomposition: split the board-minus-target residual `b`
-/// into a chromatic part (perceived hue) and an achromatic part
-/// (uniform darkening). The chromatic part is solved with OMP on the
-/// per-thread *chromatic* basis — so colored threads compete to
-/// explain hue — and the achromatic part is assigned entirely to
-/// the most-achromatic thread (typically the black primary).
-///
-/// Why the split: our canonical palette includes black, which has a
-/// large `board − thread` basis magnitude but a near-zero chromatic
-/// component. OMP on the raw darkening basis always picked black
-/// first because its basis magnitude swamped any colored thread's.
-/// The chromatic threads were then left to explain a small leftover
-/// residual, getting tiny coefficients — which translated to the
-/// solver picking black for almost every chord and color mode
-/// rendering as near-monochrome.
-///
-/// Splitting lets black and the colored threads each handle the part
-/// of the residual they're actually shaped for: black for luminance,
-/// colored primaries for hue. Colored threads get coefficients of
-/// meaningful magnitude and the solver actually uses them.
-fn decompose_nnls(
-    ata: &[f32],
-    atb: &[f32],
-    k: usize,
-    basis: &[[f32; 3]],
-    b: &[f32; 3],
-    w: &mut [f32],
-) {
-    for wi in w.iter_mut().take(k) {
-        *wi = 0.0;
-    }
-    if k == 0 {
-        return;
-    }
-
-    // Detect the most-achromatic thread: the one whose chromatic
-    // basis (basis minus its min channel) has the smallest magnitude
-    // relative to its full basis norm. Black and near-black threads
-    // have near-zero chromatic magnitude; saturated primaries have
-    // large chromatic magnitude. The "achromatic" thread gets the
-    // uniform-darkening leftover after the colored threads have done
-    // their work on the chromatic part of the residual.
-    //
-    // If *no* thread is clearly achromatic (e.g. all threads are
-    // saturated primaries with no black in the palette) then this
-    // picks the least-chromatic one and the split still produces
-    // sensible decompositions.
-    // A thread qualifies as "achromatic" only if its chromatic
-    // component is a small fraction of its total basis magnitude.
-    // For saturated primaries the ratio approaches 1 (pure chroma);
-    // for black and near-black the ratio is near 0. If no thread
-    // clears the threshold (e.g. a palette of only saturated
-    // primaries with no black), `achromatic` stays `None` and the
-    // decomposition runs pure OMP across all threads.
-    let mut achromatic: Option<usize> = None;
-    let mut min_ratio = f32::INFINITY;
-    for (i, b) in basis.iter().enumerate() {
-        let m = b[0].min(b[1]).min(b[2]);
-        let chrom_sq = (b[0] - m).powi(2) + (b[1] - m).powi(2) + (b[2] - m).powi(2);
-        let norm_sq = ata[i * k + i].max(1e-8);
-        let ratio = chrom_sq / norm_sq;
-        if ratio < min_ratio {
-            min_ratio = ratio;
-            if ratio < 0.3 {
-                achromatic = Some(i);
-            }
-        }
-    }
-
-    // How chromatic is the current residual? Ratio of its chromatic
-    // magnitude to its total magnitude. Near 1 = strongly hued
-    // pixel (skin, colored object). Near 0 = uniform-dark pixel
-    // (hair, shadow). Drives the OMP gate below: on strongly hued
-    // pixels, exclude the achromatic thread from the first pass so
-    // colored threads get first crack at the residual; on uniform-
-    // dark pixels, let the achromatic thread compete normally.
-    //
-    // Without this gate, black always wins the first OMP pass on
-    // any palette that includes it (its basis has the highest raw
-    // magnitude of any dark thread), and every pixel ends up
-    // mostly-black with near-zero colored-thread density — the
-    // color signal never reaches the chord scorer.
-    //
-    // Separately: for mostly-achromatic pixels we want black too,
-    // not color. So only exclude achromatic when the residual is
-    // *actually* chromatic.
-    // Chromatic fraction of the residual, computed directly from
-    // raw `b`: |chromatic part of b| / |b|. Clean 0..1 ratio, no
-    // tricks. Near 1 when the pixel demands a specific hue; near 0
-    // when demand is uniform darkening.
-    let b_min = b[0].min(b[1]).min(b[2]);
-    let b_norm_sq = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
-    let chrom = [b[0] - b_min, b[1] - b_min, b[2] - b_min];
-    let chrom_norm_sq = chrom[0] * chrom[0] + chrom[1] * chrom[1] + chrom[2] * chrom[2];
-    let chromatic_fraction = if b_norm_sq > 1e-8 {
-        (chrom_norm_sq / b_norm_sq).sqrt()
-    } else {
-        0.0
-    };
-    let exclude_achromatic_first_pass = achromatic.is_some() && chromatic_fraction > 0.25;
-
-    // Step 1: OMP over candidate threads. If the pixel is strongly
-    // hued, exclude the achromatic thread for this pass. Cap at 2
-    // active threads total across steps 1+2.
-    let mut proj = atb.to_vec();
-    let mut used = vec![false; k];
-    if exclude_achromatic_first_pass {
-        if let Some(a) = achromatic {
-            used[a] = true;
-        }
-    }
-    let allowed_count = used.iter().filter(|u| !**u).count();
-    let max_step1 = allowed_count.min(2);
-    for _ in 0..max_step1 {
-        let mut best_i = usize::MAX;
-        let mut best_score = f32::NEG_INFINITY;
-        for i in 0..k {
-            if used[i] {
-                continue;
-            }
-            let norm_sq = ata[i * k + i];
-            if norm_sq <= 1e-8 {
-                continue;
-            }
-            let aligned = proj[i] / norm_sq.sqrt();
-            if aligned > best_score {
-                best_score = aligned;
-                best_i = i;
-            }
-        }
-        if best_i == usize::MAX || best_score <= 0.0 {
-            break;
-        }
-        used[best_i] = true;
-        let coeff = (proj[best_i] / ata[best_i * k + best_i]).max(0.0);
-        w[best_i] += coeff;
-        for j in 0..k {
-            proj[j] -= coeff * ata[best_i * k + j];
-        }
-    }
-
-    // Step 2: if we skipped the achromatic thread in step 1, give it
-    // a chance now with whatever's left of the residual.
-    if exclude_achromatic_first_pass {
-        if let Some(a) = achromatic {
-            let norm_sq = ata[a * k + a];
-            if norm_sq > 1e-8 {
-                let coeff = (proj[a] / norm_sq).max(0.0);
-                w[a] += coeff;
-            }
-        }
-    }
 }
 
 /// Alpha-composite a thread onto the canvas along a chord. Each touched
