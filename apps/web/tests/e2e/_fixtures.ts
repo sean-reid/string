@@ -8,7 +8,7 @@ export const test = base.extend({
     page.goto = async (url, opts) => {
       if (typeof url === "string" && !url.includes("lines=")) {
         const sep = url.includes("?") ? "&" : "?";
-        url = `${url}${sep}lines=300`;
+        url = `${url}${sep}lines=120`;
       }
       return originalGoto(url, opts);
     };
