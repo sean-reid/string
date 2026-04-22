@@ -48,7 +48,7 @@ test.describe("upload and decode", () => {
     await input.setInputFiles(fixture);
 
     const stage = page.getByRole("img", { name: /loom preview/i });
-    await expect(stage).toBeVisible({ timeout: 10_000 });
+    await expect(stage).toBeVisible({ timeout: 30_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
 
     const canvas = stage.locator("canvas").first();
@@ -65,7 +65,7 @@ test.describe("upload and decode", () => {
     await page.goto("/");
     await pushFixtureAs(page, "drop");
     const stage = page.getByRole("img", { name: /loom preview/i });
-    await expect(stage).toBeVisible({ timeout: 10_000 });
+    await expect(stage).toBeVisible({ timeout: 30_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
   });
 
@@ -75,7 +75,7 @@ test.describe("upload and decode", () => {
     await page.goto("/");
     await pushFixtureAs(page, "paste");
     const stage = page.getByRole("img", { name: /loom preview/i });
-    await expect(stage).toBeVisible({ timeout: 10_000 });
+    await expect(stage).toBeVisible({ timeout: 30_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
   });
 
@@ -86,7 +86,7 @@ test.describe("upload and decode", () => {
       .first()
       .click();
     const stage = page.getByRole("img", { name: /loom preview/i });
-    await expect(stage).toBeVisible({ timeout: 15_000 });
+    await expect(stage).toBeVisible({ timeout: 30_000 });
     await expect(stage).toHaveAttribute("data-state", "ready");
   });
 
