@@ -41,6 +41,16 @@ const HIGHLIGHT_PERCENTILE: f32 = 0.01;
 /// between the solver, the rail default, and the mono golden test.
 const CREAM_SRGB: [u8; 3] = [0xF4, 0xEF, 0xE5];
 
+/// Rec.709 luminance of the dark disc the threads sit on. Every palette
+/// entry must exceed this by at least `MIN_PALETTE_MARGIN` — a thread
+/// with the same luminance as the board contributes no light and would
+/// occupy a slot the solver can't use.
+const BOARD_LUMINANCE: f32 = 0.003_631;
+/// Minimum linear-luminance margin above the board. Below this a thread
+/// can't add enough light per crossing to measurably lift the residual,
+/// even under tight coverage.
+const MIN_PALETTE_MARGIN: f32 = 0.05;
+
 /// Public entry point. Returns `k * 3` sRGB bytes; returns `Err` on invalid
 /// input rather than panicking so the wasm boundary is well-behaved.
 pub fn extract_palette_bytes(
@@ -66,9 +76,39 @@ pub fn extract_palette_bytes(
     if samples.is_empty() {
         return Ok(CREAM_SRGB.repeat(k));
     }
-    let picks = farthest_point_sampling(&samples, k, seed);
-    let polished = polish_kmeans(&samples, picks);
+    // Exclude samples that can't be meaningfully rendered by any thread.
+    // Shadow pixels at or below board luminance are represented by absence
+    // of thread, not a dark thread — including them in the palette pool
+    // just burns slots on colors the solver will rarely pick.
+    let candidates = filter_above_board(&samples);
+    let pool = if candidates.len() >= k {
+        candidates
+    } else {
+        // Fully dark image: fall back to the whole sample set and let the
+        // polish step settle. User can switch to manual mode if this
+        // photo genuinely wants dark threads.
+        samples.clone()
+    };
+    let picks = farthest_point_sampling(&pool, k, seed);
+    let polished = polish_kmeans(&pool, picks);
     Ok(linear_to_srgb_bytes(&polished))
+}
+
+/// Drop samples whose Rec.709 luminance is within `MIN_PALETTE_MARGIN` of
+/// the board. Returned samples are the "usefully-bright" pool the palette
+/// picker should actually consider.
+fn filter_above_board(samples: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let threshold = BOARD_LUMINANCE + MIN_PALETTE_MARGIN;
+    samples
+        .iter()
+        .copied()
+        .filter(|c| rec709(*c) > threshold)
+        .collect()
+}
+
+/// Rec.709 relative luminance of a linear-RGB triple.
+fn rec709(c: [f32; 3]) -> f32 {
+    0.212_6 * c[0] + 0.715_2 * c[1] + 0.072_2 * c[2]
 }
 
 /// Downsample the image to SAMPLE_DIM × SAMPLE_DIM by averaging each tile,
