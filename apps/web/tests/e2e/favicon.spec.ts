@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./_fixtures";
 
 test("favicon renders at icon sizes on light + dark surface", async ({
   page,

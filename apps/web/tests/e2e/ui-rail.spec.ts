@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./_fixtures";
 
 test("rail: mono-only controls, no palette UI, no board selector, no show-source", async ({
   page,

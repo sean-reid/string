@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./_fixtures";
 
 test("about page renders the history + petros credit", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 1400 });

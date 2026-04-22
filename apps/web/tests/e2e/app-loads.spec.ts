@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./_fixtures";
 
 test.describe("app shell", () => {
   test("home route renders with no console errors", async ({ page }) => {
