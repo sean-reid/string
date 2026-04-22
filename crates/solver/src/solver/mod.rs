@@ -103,12 +103,40 @@ enum SolverState {
         /// coverage still to be laid at pixel p; chord deposits
         /// subtract `opacity · coverage` from it, clamped at zero.
         density: Vec<Vec<f32>>,
+        /// Shared scalar luminance residual, length `pixel_count`.
+        /// Parallel to `density` but tracks "brightness still needed"
+        /// regardless of thread color. Any chord of any thread gets
+        /// partial score credit for depositing luminance here, so dim
+        /// pixels at the periphery (where NNLS decomposition gives
+        /// near-zero density to every thread) still attract chords.
+        /// Without this, mono is denser than color at dim regions
+        /// because mono's one residual never zeros out on faint
+        /// pixels while color's per-thread densities do.
+        luminance: Vec<f32>,
+        /// Rec.709 luminance of each palette thread minus board.
+        /// Precomputed once; weights the luminance term in scoring
+        /// and deposit so brighter threads get more luminance credit
+        /// per chord.
+        thread_luminance: Vec<f32>,
         /// Alpha-composited preview canvas maintained for display.
-        /// Not used in scoring — that's purely the per-thread density
-        /// fields above.
+        /// Not used in scoring — that's purely the density + luminance
+        /// residual fields above.
         canvas: Vec<f32>,
     },
 }
+
+/// Scoring weight on the luminance residual relative to the per-thread
+/// density residual. `1.0` gives equal-weight sums; `0.5` keeps density
+/// dominant in well-decomposed regions (face, objects with a clear
+/// hue) while still letting luminance take over where density is
+/// near-zero (dim background, shadows).
+const LUMINANCE_SCORE_WEIGHT: f32 = 0.5;
+
+/// Rec.709 luminance coefficients. Used in multiple places — score
+/// weighting, target-luminance init, thread_luminance precompute.
+const REC709_R: f32 = 0.2126;
+const REC709_G: f32 = 0.7152;
+const REC709_B: f32 = 0.0722;
 
 pub struct Solver {
     width: usize,
@@ -199,8 +227,14 @@ impl Solver {
                     }
                 }
 
+                let thread_luminance: Vec<f32> = thread_basis
+                    .iter()
+                    .map(|c| REC709_R * c[0] + REC709_G * c[1] + REC709_B * c[2])
+                    .collect();
+
                 let mut density: Vec<Vec<f32>> =
                     (0..k).map(|_| vec![0.0f32; pixel_count]).collect();
+                let mut luminance = vec![0.0f32; pixel_count];
                 let mut w = vec![0.0f32; k];
                 let mut atb = vec![0.0f32; k];
                 for (pix, bgra) in preprocessed_rgba
@@ -223,6 +257,7 @@ impl Solver {
                     for (i, field) in density.iter_mut().enumerate() {
                         field[pix] = w[i];
                     }
+                    luminance[pix] = REC709_R * b[0] + REC709_G * b[1] + REC709_B * b[2];
                 }
 
                 let mut canvas = Vec::with_capacity(pixel_count * 3);
@@ -231,7 +266,12 @@ impl Solver {
                     canvas.push(BOARD_LINEAR[1]);
                     canvas.push(BOARD_LINEAR[2]);
                 }
-                SolverState::Color { density, canvas }
+                SolverState::Color {
+                    density,
+                    luminance,
+                    thread_luminance,
+                    canvas,
+                }
             }
         };
 
@@ -334,11 +374,18 @@ impl Solver {
                     );
                     out.push((i, 0u8, s));
                 }
-                SolverState::Color { density, .. } => {
+                SolverState::Color {
+                    density,
+                    luminance,
+                    thread_luminance,
+                    ..
+                } => {
                     for (c_idx, field) in density.iter().enumerate() {
-                        let s = score_chord_scalar(
+                        let s = score_chord_color(
                             field,
+                            luminance,
                             &self.weights,
+                            thread_luminance[c_idx],
                             self.width,
                             self.height,
                             (cx, cy),
@@ -429,17 +476,32 @@ impl Solver {
                         self.config.opacity,
                     );
                 }
-                SolverState::Color { density, canvas } => {
+                SolverState::Color {
+                    density,
+                    luminance,
+                    thread_luminance,
+                    canvas,
+                } => {
                     let idx = color_index as usize;
-                    // Density-residual update (the scoring signal):
-                    // the thread-i field loses `opacity · coverage`
-                    // at every touched pixel, clamped at zero.
+                    // Density-residual update: thread-i field loses
+                    // `opacity · coverage` at every touched pixel.
                     deposit_mono(
                         &mut density[idx],
                         self.width,
                         self.height,
                         endpoints,
                         self.config.opacity,
+                    );
+                    // Luminance-residual update: any thread reduces
+                    // the shared luminance budget proportional to its
+                    // own brightness. `opacity · coverage · thread_lum`
+                    // per pixel, clamped at zero.
+                    deposit_mono(
+                        luminance,
+                        self.width,
+                        self.height,
+                        endpoints,
+                        self.config.opacity * thread_luminance[idx],
                     );
                     // Preview canvas (display only, not scored on):
                     // alpha composite so the rendered output matches
@@ -469,10 +531,44 @@ impl Solver {
     }
 }
 
+/// Color-mode chord score: weighted average along the chord of
+/// `density[pix] + LUMINANCE_SCORE_WEIGHT · thread_lum · luminance[pix]`,
+/// normalized by weighted coverage. Combines the per-thread density
+/// term (primary signal — correct-hue chords for the subject win
+/// cleanly) with a shared luminance term weighted by the thread's own
+/// brightness (secondary signal — lets dim bright threads attract
+/// chords into periphery regions the NNLS decomposition leaves with
+/// near-zero density).
+#[allow(clippy::too_many_arguments)]
+fn score_chord_color(
+    density: &[f32],
+    luminance: &[f32],
+    weights: &[f32],
+    thread_lum: f32,
+    width: usize,
+    height: usize,
+    p0: (f32, f32),
+    p1: (f32, f32),
+) -> f32 {
+    let lum_scale = LUMINANCE_SCORE_WEIGHT * thread_lum;
+    let mut sum = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, width, height, |idx, c| {
+        let w = weights[idx];
+        let cw = c * w;
+        sum += (density[idx] + lum_scale * luminance[idx]) * cw;
+        weight_sum += cw;
+    });
+    if weight_sum > 0.0 {
+        sum / weight_sum
+    } else {
+        0.0
+    }
+}
+
 /// Per-chord score for a scalar residual field: weighted average of
 /// `residual × coverage × weight` along the chord, normalized by
-/// weighted coverage. Used identically by mono (one residual) and
-/// color (one density residual per palette thread).
+/// weighted coverage. Used by mono mode only.
 fn score_chord_scalar(
     residual: &[f32],
     weights: &[f32],
