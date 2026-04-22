@@ -25,8 +25,18 @@ interface SolverState {
   /** Palette index per line in `sequence`. Length tracks `sequence.length`;
    *  entry 0 pairs with the anchor pin (always 0). */
   sequenceColors: number[];
-  /** sRGB hex strings, one per palette index; PR 2 is always length 1. */
+  /** Convenience alias for `suggestionsBySize[physical.palette.length]` —
+   *  the extracted palette at the user's current palette size. Kept so
+   *  exports / older code that expects a single "extracted palette" can
+   *  grab it without knowing the indexing scheme. */
   palette: string[];
+  /** Image-derived palette suggestions indexed by palette size. Each
+   *  entry `suggestionsBySize[k]` is the best k-color FPS run on the
+   *  current image (k in 1..MAX_PALETTE_SIZE). `suggestionsBySize[0]`
+   *  is empty — sentinel. Populated once per solve. Auto-pick reads
+   *  this at the user's current palette size for a genuinely best
+   *  N-color palette rather than a prefix of a larger one. */
+  suggestionsBySize: string[][];
   pinPositions: Float32Array | null;
   pinCount: number;
   imageSize: number;
@@ -72,7 +82,8 @@ const baseStoreFactory = (
   seed: 0x53_74_72_69_6e_67_01n,
   sequence: [],
   sequenceColors: [],
-  palette: ["#f4efe5"],
+  palette: ["#111111"],
+  suggestionsBySize: [],
   pinPositions: null,
   pinCount: 0,
   imageSize: 0,
@@ -118,11 +129,12 @@ const baseStoreFactory = (
       const physical = get().physical;
       const remote = getSolverWorker();
 
-      // Always extract a reference palette of MAX_PALETTE_SIZE colors
-      // and park it in `store.palette`. It's used as suggestions by
-      // the "+ add color" button in the UI; the solver itself runs on
-      // `physical.palette`, which is whatever the user has built up
-      // by adding, editing, or removing swatches.
+      // Run FPS palette extraction at every size 1..MAX_PALETTE_SIZE
+      // and park the results in `suggestionsBySize`. Auto-pick and the
+      // "+ add color" button key into the array by the user's current
+      // palette size so "auto-pick at 3" returns the best 3-color
+      // palette (an FPS run with k=3), not the first 3 picks of the
+      // k=6 run — which would just be the 3 darkest hull vertices.
       const facePalette = image.meta.faceBox
         ? {
             x: image.meta.faceBox.x,
@@ -131,16 +143,26 @@ const baseStoreFactory = (
             h: image.meta.faceBox.h,
           }
         : null;
-      const suggestionsBytes = await remote.extractPalette(
-        new Uint8Array(image.colorRgba),
-        image.meta.size,
-        6,
-        get().seed,
-        facePalette,
+      const suggestionsBySize: string[][] = [[]];
+      for (let k = 1; k <= 6; k++) {
+        const bytes = await remote.extractPalette(
+          new Uint8Array(image.colorRgba),
+          image.meta.size,
+          k,
+          get().seed,
+          facePalette,
+        );
+        if (get().generationId !== generationId) return;
+        suggestionsBySize.push(srgbBytesToHex(bytes));
+      }
+      const userSize = Math.max(
+        1,
+        Math.min(physical.palette.length, 6),
       );
-      if (get().generationId !== generationId) return;
-      const suggestions = srgbBytesToHex(suggestionsBytes);
-      useSolverStore.setState({ palette: suggestions });
+      useSolverStore.setState({
+        suggestionsBySize,
+        palette: suggestionsBySize[userSize] ?? [],
+      });
 
       const palette = [...physical.palette];
 

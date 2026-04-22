@@ -72,7 +72,7 @@ export interface PhysicalParams {
 }
 
 export const DEFAULT_PHYSICAL: PhysicalParams = {
-  boardId: "b16",
+  boardId: "b12",
   threadId: "polyester",
   pinCount: 288,
   // Vrellis-style dark-on-cream uses a thin, low-opacity thread that

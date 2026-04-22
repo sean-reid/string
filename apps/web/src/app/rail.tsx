@@ -11,18 +11,9 @@ import {
   estimatedThreadMeters,
   minSkipPins,
   threadCoverage,
-  type BoardId,
 } from "@/solver/physics";
-import { Segmented } from "@/components/segmented";
 import { Slider } from "@/components/slider";
 import { ColorPicker } from "@/components/color-picker";
-
-const BOARD_OPTIONS: Array<{ value: BoardId; label: string }> = [
-  { value: "b12", label: "12 in" },
-  { value: "b16", label: "16 in" },
-  { value: "b20", label: "20 in" },
-  { value: "b24", label: "24 in" },
-];
 
 export function ParameterRail() {
   const imageStatus = useImageStore((s) => s.status);
@@ -89,13 +80,6 @@ export function ParameterRail() {
 
       {hasImage && (
         <div className="flex flex-col gap-5">
-          <Segmented
-            label="Board"
-            value={physical.boardId}
-            onChange={(v) => setPhysical({ boardId: v })}
-            options={BOARD_OPTIONS}
-            disabled={running}
-          />
           <PalettePicker disabled={running} />
 
           <Slider
@@ -193,12 +177,17 @@ export function ParameterRail() {
 function PalettePicker({ disabled }: { disabled: boolean }) {
   const physical = useSolverStore((s) => s.physical);
   const setPhysical = useSolverStore((s) => s.setPhysical);
-  const storePalette = useSolverStore((s) => s.palette);
+  const suggestionsBySize = useSolverStore((s) => s.suggestionsBySize);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   const palette = physical.palette?.length
     ? physical.palette
     : [defaultSwatch()];
+
+  /** Return the image-derived palette of size k, or an empty array if
+   *  suggestions haven't been computed yet (pre-solve). */
+  const suggestionsAt = (k: number): string[] =>
+    suggestionsBySize[Math.max(1, Math.min(k, MAX_PALETTE_SIZE))] ?? [];
 
   const updateAt = (index: number, hex: string) => {
     const next = palette.slice();
@@ -215,30 +204,32 @@ function PalettePicker({ disabled }: { disabled: boolean }) {
 
   const addSwatch = () => {
     if (palette.length >= MAX_PALETTE_SIZE) return;
-    // Seed from the last extracted palette if it has a suggestion we
-    // haven't used yet, otherwise fall back to black so the user can
-    // edit from a sensible starting point.
-    const unused = storePalette.find((hex) => !palette.includes(hex));
+    // Ask the extractor for a palette one size larger than the user's
+    // current one and use whichever entry of the larger set isn't
+    // already in the user's palette. That way the added color is the
+    // "what would you pick if you had one more slot?" answer, not
+    // just the next prefix of some fixed-size extract. Falls back to
+    // black if extractions haven't run yet.
+    const larger = suggestionsAt(palette.length + 1);
+    const unused = larger.find((hex) => !palette.includes(hex));
     const seed = unused ?? defaultSwatch();
-    const next = [...palette, seed];
-    setPhysical({ palette: next });
+    setPhysical({ palette: [...palette, seed] });
   };
 
   const autoPickAll = () => {
-    // Overwrite the whole palette with the image's extracted
-    // suggestions. The suggestions list is sized to MAX_PALETTE_SIZE
-    // and ordered dark → light. Taking the first min(current, N)
-    // replaces the current set in-place; if the user had a longer
-    // palette than the suggestion pool, keep the existing count by
-    // padding the tail with black (editable).
-    if (storePalette.length === 0) return;
-    const n = Math.max(1, Math.min(palette.length, MAX_PALETTE_SIZE));
-    const take = storePalette.slice(0, n);
-    while (take.length < n) take.push(defaultSwatch());
-    setPhysical({ palette: take });
+    // Replace the whole user palette with the best image-derived
+    // palette AT THE USER'S CURRENT SIZE — an FPS run seeded with
+    // k=palette.length rather than the first N picks of the k=6
+    // extract. The two are different: FPS-at-3 picks three vertices
+    // maximally spread in RGB, FPS-at-6 prefixed to 3 gives the
+    // three darkest. The former is what the user wants.
+    const size = Math.max(1, Math.min(palette.length, MAX_PALETTE_SIZE));
+    const take = suggestionsAt(size);
+    if (take.length === 0) return;
+    setPhysical({ palette: take.slice(0, size) });
   };
 
-  const canAutoPick = storePalette.length > 0;
+  const canAutoPick = suggestionsAt(palette.length).length > 0;
 
   return (
     <div className="flex flex-col gap-3">
