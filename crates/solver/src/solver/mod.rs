@@ -149,15 +149,37 @@ impl Solver {
                 SolverState::Mono { residual }
             }
             Mode::Color => {
+                // Per-channel maximum the canvas can ever reach under
+                // unlimited deposits of any palette thread. Alpha
+                // compositing `canvas += k*(thread - canvas)` drives
+                // canvas toward whichever thread is depositing; with
+                // multiple threads the max reachable canvas is the
+                // per-channel max across threads. A target pixel
+                // brighter than this cap is unreachable — residual
+                // never hits zero there, the scoring never fully
+                // drops, and the solver keeps piling thread through
+                // that region trying to close a gap that can't
+                // close. Clamping the target at the cap makes residual
+                // saturate exactly when canvas reaches what threads
+                // can physically achieve, so scores drop to zero and
+                // the solver stops over-depositing on unreachable
+                // highlights.
+                let mut max_thread = [0.0f32; 3];
+                for thread in palette.colors() {
+                    max_thread[0] = max_thread[0].max(thread[0]);
+                    max_thread[1] = max_thread[1].max(thread[1]);
+                    max_thread[2] = max_thread[2].max(thread[2]);
+                }
+
                 let mut target = Vec::with_capacity(pixel_count * 3);
                 for i in 0..pixel_count {
                     let base = i * 4;
                     let tr = srgb_to_linear(preprocessed_rgba[base] as f32 / 255.0);
                     let tg = srgb_to_linear(preprocessed_rgba[base + 1] as f32 / 255.0);
                     let tb = srgb_to_linear(preprocessed_rgba[base + 2] as f32 / 255.0);
-                    target.push(tr.max(BOARD_LINEAR[0]));
-                    target.push(tg.max(BOARD_LINEAR[1]));
-                    target.push(tb.max(BOARD_LINEAR[2]));
+                    target.push(tr.clamp(BOARD_LINEAR[0], max_thread[0]));
+                    target.push(tg.clamp(BOARD_LINEAR[1], max_thread[1]));
+                    target.push(tb.clamp(BOARD_LINEAR[2], max_thread[2]));
                 }
                 let mut canvas = Vec::with_capacity(pixel_count * 3);
                 for _ in 0..pixel_count {
