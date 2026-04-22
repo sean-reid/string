@@ -2,41 +2,71 @@ import { Link } from "react-router";
 
 export function AboutPage() {
   return (
-    <section className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">
+    <section className="mx-auto flex w-full max-w-2xl flex-col gap-8 p-6">
       <header>
         <h1 className="font-display text-3xl tracking-tight">About</h1>
         <p className="mt-2 text-muted">
-          Turning a photograph into string art, then into step-by-step
-          instructions for building it on a wood round.
+          Continuous-string portraits, and what this site does with them.
         </p>
       </header>
 
-      <section className="flex flex-col gap-3 text-sm leading-relaxed text-ink">
+      <section className="flex flex-col gap-4 text-sm leading-relaxed text-ink">
+        <h2 className="font-display text-lg">Petros Vrellis</h2>
         <p>
-          String art is a craft where thread is wrapped around nails driven
-          into a circular board, in a specific order, so the overlapping
-          chords form an image. Lit regions of the target photo end up with
-          many thread passes; dark regions get few, and the wood shows
-          through.
+          In 2016{" "}
+          <a
+            href="http://artof01.com/vrellis/works/knit.html"
+            target="_blank"
+            rel="noreferrer"
+            className="underline decoration-line hover:decoration-ink"
+          >
+            Petros Vrellis
+          </a>
+          {" "}published <em>A new way to knit</em>: a single black thread
+          wrapped between 200 nails on a circular wooden hoop, 3,000 to
+          4,000 times, in an order chosen by software. Each crossing
+          darkens the region it passes through; the algorithm picks the
+          next crossing to be wherever the image still needs darkening
+          most. The output is a recognisable portrait of the source
+          photograph, made from one continuous string.
         </p>
         <p>
-          The solver picks one chord at a time. It scores every candidate pin
-          by the line integral of brightness still needed along the chord,
-          samples one via softmax with an annealed temperature, then subtracts
-          the chord's thread coverage from the residual. A ban queue on the
-          last few pins prevents repetitive spokes. Parameters match the
-          physical piece you would build: board diameter in inches, thread
-          width in millimetres, minimum chord length as a percent of the
-          diameter.
-        </p>
-        <p>
-          Everything runs in your browser. The solver is a Rust crate
-          compiled to WebAssembly, the rasteriser uses Xiaolin-Wu antialiased
-          lines, and no image leaves your machine.
+          Most continuous-string portraits you see online use Vrellis's
+          method or a close variant. Later work extends it to small
+          fixed palettes (usually black plus red, yellow, blue) wound
+          one spool at a time.
         </p>
       </section>
 
-      <section className="flex flex-col gap-2 text-sm text-muted">
+      <section className="flex flex-col gap-4 text-sm leading-relaxed text-ink">
+        <h2 className="font-display text-lg">The algorithm</h2>
+        <p>
+          Start with a "darkness still needed" residual at every pixel.
+          At each step, score every legal chord between two pins by the
+          weighted sum of that residual along its path. Pick the
+          highest-scoring chord. Subtract a thread's coverage from the
+          residual at the pixels the chord crosses. Repeat a few
+          thousand times, stopping when the line budget runs out.
+        </p>
+        <p>
+          Vrellis's combination of low per-crossing opacity (about 3%),
+          a few thousand chords, and greedy scoring is the reference
+          most implementations follow.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-4 text-sm leading-relaxed text-ink">
+        <h2 className="font-display text-lg">What this site does</h2>
+        <p>
+          Upload a photo. The solver runs in your browser, compiled to
+          WebAssembly. The loom shows the pattern as it is generated. The
+          Build tab has a printable nail template, a pin-by-pin
+          construction booklet, and a read-aloud mode for building the
+          piece by hand. Images stay on your machine.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-3 text-sm text-muted">
         <h2 className="font-display text-lg text-ink">Further reading</h2>
         <ul className="flex list-disc flex-col gap-1 pl-5">
           <li>
@@ -46,7 +76,17 @@ export function AboutPage() {
               rel="noreferrer"
               className="hover:text-ink"
             >
-              Petros Vrellis, the original algorithmic string portrait
+              Petros Vrellis, <em>A new way to knit</em> (2016)
+            </a>
+          </li>
+          <li>
+            <a
+              href="https://erikdemaine.org/fonts/stringart/"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-ink"
+            >
+              Erik &amp; Martin Demaine, string-art fonts (MIT)
             </a>
           </li>
           <li>
