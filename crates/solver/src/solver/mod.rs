@@ -283,7 +283,7 @@ impl Solver {
                     for (i, basis) in thread_basis.iter().enumerate() {
                         atb[i] = basis[0] * b[0] + basis[1] * b[1] + basis[2] * b[2];
                     }
-                    decompose_nnls(&ata, &atb, k, &thread_basis, &mut w);
+                    decompose_nnls(&ata, &atb, k, &thread_basis, &b, &mut w);
                     for (i, field) in density.iter_mut().enumerate() {
                         field[pix] = w[i];
                     }
@@ -582,15 +582,32 @@ fn score_chord_color(
 ) -> f32 {
     let lum_scale = LUMINANCE_SCORE_WEIGHT * thread_lum;
     let mut sum = 0.0f32;
-    let mut weight_sum = 0.0f32;
+    let mut relevant_weight = 0.0f32;
     chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, width, height, |idx, c| {
+        // Only count pixels where THIS thread has positive density
+        // demand. In color mode the per-thread density field is
+        // sparse — a warm thread has nonzero density only in pixels
+        // whose decomposition assigned weight to it. Averaging over
+        // the entire chord (including pixels with zero demand) lets
+        // whichever thread has the LARGEST demanding region (black,
+        // usually) win every chord regardless of which subregion the
+        // chord actually passes through, and color threads never get
+        // picked. Restricting the normalization denominator to
+        // relevant pixels fixes that: a chord through a face region
+        // gets credit for the warm thread's demand there, diluted
+        // only by other face-pixel variation, not by bare-board or
+        // shadow-dominated pixels along the same chord path.
+        let signal = density[idx] + lum_scale * luminance[idx];
+        if signal <= 0.0 {
+            return;
+        }
         let w = weights[idx];
         let cw = c * w;
-        sum += (density[idx] + lum_scale * luminance[idx]) * cw;
-        weight_sum += cw;
+        sum += signal * cw;
+        relevant_weight += cw;
     });
-    if weight_sum > 0.0 {
-        sum / weight_sum
+    if relevant_weight > 0.0 {
+        sum / relevant_weight
     } else {
         0.0
     }
@@ -652,7 +669,14 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
 /// of the residual they're actually shaped for: black for luminance,
 /// colored primaries for hue. Colored threads get coefficients of
 /// meaningful magnitude and the solver actually uses them.
-fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, basis: &[[f32; 3]], w: &mut [f32]) {
+fn decompose_nnls(
+    ata: &[f32],
+    atb: &[f32],
+    k: usize,
+    basis: &[[f32; 3]],
+    b: &[f32; 3],
+    w: &mut [f32],
+) {
     for wi in w.iter_mut().take(k) {
         *wi = 0.0;
     }
@@ -711,27 +735,20 @@ fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, basis: &[[f32; 3]], w: &mu
     // Separately: for mostly-achromatic pixels we want black too,
     // not color. So only exclude achromatic when the residual is
     // *actually* chromatic.
-    let b_full_sq = atb.iter().enumerate().fold(0.0f32, |acc, (i, &v)| {
-        // Approximate |b|² from (atb·proj)-ish — we don't have raw b
-        // here. Use the largest atb·atb/|basis|² ratio as a proxy;
-        // that's the projected length of b on whichever basis it
-        // aligns best with, which is an upper bound on |b|².
-        let nn = ata[i * k + i].max(1e-8);
-        let aligned_sq = v * v / nn;
-        acc.max(aligned_sq)
-    });
-    let exclude_achromatic_first_pass = if let Some(a) = achromatic {
-        // Compute how much of `b` the achromatic thread alone
-        // explains. If it's most of `b`, the residual after black
-        // would be small and chromatic — so black should go first
-        // (skip exclusion). If it's only a fraction, the residual
-        // IS chromatic and we should handle color first.
-        let aligned_sq_a = atb[a] * atb[a] / ata[a * k + a].max(1e-8);
-        let chromatic_fraction = 1.0 - (aligned_sq_a / b_full_sq.max(1e-8)).clamp(0.0, 1.0);
-        chromatic_fraction > 0.35
+    // Chromatic fraction of the residual, computed directly from
+    // raw `b`: |chromatic part of b| / |b|. Clean 0..1 ratio, no
+    // tricks. Near 1 when the pixel demands a specific hue; near 0
+    // when demand is uniform darkening.
+    let b_min = b[0].min(b[1]).min(b[2]);
+    let b_norm_sq = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+    let chrom = [b[0] - b_min, b[1] - b_min, b[2] - b_min];
+    let chrom_norm_sq = chrom[0] * chrom[0] + chrom[1] * chrom[1] + chrom[2] * chrom[2];
+    let chromatic_fraction = if b_norm_sq > 1e-8 {
+        (chrom_norm_sq / b_norm_sq).sqrt()
     } else {
-        false
+        0.0
     };
+    let exclude_achromatic_first_pass = achromatic.is_some() && chromatic_fraction > 0.25;
 
     // Step 1: OMP over candidate threads. If the pixel is strongly
     // hued, exclude the achromatic thread for this pass. Cap at 2
