@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from "react";
+import { useEffect, useCallback, useRef, useState } from "react";
 import { useImageStore } from "@/image/store";
 import { useSolverStore } from "@/solver/store";
 import { ExportPanel } from "@/export/export-panel";
@@ -17,6 +17,7 @@ import { ColorPicker } from "@/components/color-picker";
 
 export function ParameterRail() {
   const imageStatus = useImageStore((s) => s.status);
+  const imageHash = useImageStore((s) => s.meta?.hash ?? null);
   const physical = useSolverStore((s) => s.physical);
   const setPhysical = useSolverStore((s) => s.setPhysical);
   const solverStatus = useSolverStore((s) => s.status);
@@ -33,11 +34,20 @@ export function ParameterRail() {
     resetImage();
   }, [cancel, resetSolver, resetImage]);
 
+  // Auto-solve on image change. Keyed on the image hash — a fresh
+  // image triggers a fresh solve even if the previous one finished
+  // ("done"). `lastSolvedHash` tracks the hash we last kicked off a
+  // solve for, so we don't loop after the solve transitions through
+  // "running" → "done" while the hash stays the same.
+  const lastSolvedHash = useRef<string | null>(null);
   useEffect(() => {
     if (imageStatus !== "ready") return;
-    if (solverStatus !== "idle") return;
+    if (!imageHash) return;
+    if (solverStatus === "running") return;
+    if (lastSolvedHash.current === imageHash) return;
+    lastSolvedHash.current = imageHash;
     void start();
-  }, [imageStatus, solverStatus, start]);
+  }, [imageStatus, imageHash, solverStatus, start]);
 
   useEffect(() => {
     if (solverStatus !== "running") return;

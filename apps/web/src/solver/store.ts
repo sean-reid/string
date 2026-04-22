@@ -263,6 +263,11 @@ export const useSolverStore = create<SolverState>()(
       sequence: state.sequence,
       sequenceColors: state.sequenceColors,
       palette: state.palette,
+      // Persist so auto-pick stays enabled across page reloads when
+      // the image is cached — otherwise a user who refreshes sees the
+      // old loom but a disabled auto-pick button until they click
+      // "Generate again".
+      suggestionsBySize: state.suggestionsBySize,
       pinPositions: state.pinPositions,
       pinCount: state.pinCount,
       imageSize: state.imageSize,
