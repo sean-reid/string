@@ -99,8 +99,19 @@ test.describe("build guide", () => {
       page.getByRole("heading", { name: "Work the sequence" }),
     ).toBeVisible();
     await expect(
+      page.getByRole("heading", { name: "Alternate the wrap side" }),
+    ).toBeVisible();
+    await expect(
       page.getByRole("heading", { name: /If something goes sideways/ }),
     ).toBeVisible();
+  });
+
+  test("Header shows thread color indicator", async ({ page }) => {
+    test.setTimeout(90_000);
+    await primeAndNavigate(page);
+    const swatch = page.getByLabel("Thread color");
+    await expect(swatch).toBeVisible();
+    await expect(swatch).toContainText(/black thread/i);
   });
 
   test("Printables buttons render under Materials tab", async ({ page }) => {

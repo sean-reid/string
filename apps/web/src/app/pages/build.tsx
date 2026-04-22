@@ -129,6 +129,17 @@ export function BuildPage() {
           {bom.threadSpools} {bom.threadSpools === 1 ? "spool" : "spools"} ·{" "}
           {bom.lineCount.toLocaleString()} lines
         </p>
+        <div
+          className="mt-1 flex items-center gap-2 font-mono text-xs text-muted"
+          aria-label="Thread color"
+        >
+          <span
+            aria-hidden="true"
+            className="inline-block h-3 w-3 rounded-full border border-line"
+            style={{ backgroundColor: palette[0] ?? "#141311" }}
+          />
+          <span>black thread on cream board</span>
+        </div>
       </header>
 
       <div className="grid gap-6 md:grid-cols-[minmax(0,480px)_minmax(0,1fr)] md:items-start">

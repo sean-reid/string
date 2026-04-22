@@ -6,6 +6,7 @@ import {
   NailsArt,
   TroubleArt,
   WeaveArt,
+  WrapArt,
 } from "./step-illustrations";
 
 interface Section {
@@ -20,8 +21,8 @@ const SECTIONS: Section[] = [
     art: <BoardArt />,
     steps: [
       "Start with a birch plywood disc at the diameter you picked. Half-inch thickness is the minimum; thinner and nails will poke through under tension.",
-      "Sand the face with 220 grit so paint grips.",
-      "Paint matte black, two thin coats, fully dry between. Overnight before the next step so the paint does not lift when tape comes off.",
+      "Sand the face with 220 grit so paint or finish grips.",
+      "Finish the face cream. Two thin coats of matte chalk paint in a warm off-white, fully dry between, gives the dark thread the contrast it needs. Satin clear over natural birch works too if you prefer the wood grain.",
     ],
   },
   {
@@ -53,6 +54,15 @@ const SECTIONS: Section[] = [
       "Tension: firm enough that a flick of the line leaves it perfectly straight. Not so tight the nail leans.",
       "Press Space to play or pause auto-advance. Arrow keys step one nail at a time. Progress persists in this browser.",
       "Out of thread: tie a surgeon’s knot onto the new length on the back side of the nearest nail and glue it. The knot hides behind the nail.",
+    ],
+  },
+  {
+    title: "Alternate the wrap side",
+    art: <WrapArt />,
+    steps: [
+      "Alternate which side of each nail the thread wraps around: left of one nail, right of the next, back to left on the one after. The pattern never breaks for the duration of the build.",
+      "The reason is purely aesthetic. Alternating wraps keep the finished face looking even at every nail; two same-side wraps in a row make the thread pile visibly on one side and read noisy up close.",
+      "Quick self-check: after each new line, glance back at the last few nails. If left-right-left-right is holding, keep going. If you catch two of the same in a row, back up to the last good nail and redo from there.",
     ],
   },
   {

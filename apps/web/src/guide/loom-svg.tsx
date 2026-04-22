@@ -13,14 +13,17 @@ interface Props {
 }
 
 const DEFAULT_ACCENT = "#D4541F";
+const DEFAULT_THREAD = "#141311";
 
 const LABEL_EVERY = 20;
 const STROKE_BATCH = 18;
 
 /**
- * Dark loom matching the Compose tab. Threads accumulate in light cream
- * on a warm near-black disc so the piece reads the same visual language
- * as the string-art view. The next nail is the only accent element.
+ * Cream loom matching the Compose tab post-Vrellis-flip. Threads render
+ * dark on a cream board; a `multiply` blend mode makes stacked crossings
+ * progressively darken the board the way physical thread does. Current
+ * and next nails get accent rings so the builder's place in the sequence
+ * is unambiguous.
  */
 export function LoomSvg({
   pinPositions,
@@ -31,12 +34,9 @@ export function LoomSvg({
   palette,
   currentStep,
 }: Props) {
-  const multiColor = (palette?.length ?? 1) > 1;
-  const upcomingColor =
-    multiColor && palette && sequenceColors
-      ? (palette[sequenceColors[currentStep + 1] ?? 0] ?? DEFAULT_ACCENT)
-      : DEFAULT_ACCENT;
-  const paletteResolved = palette && palette.length > 0 ? palette : ["#f4efe5"];
+  const upcomingColor = DEFAULT_ACCENT;
+  const paletteResolved =
+    palette && palette.length > 0 ? palette : [DEFAULT_THREAD];
   const batches = useMemo(() => {
     if (!pinPositions || imageSize <= 0)
       return [] as Array<{ d: string; color: string }>;
@@ -48,7 +48,7 @@ export function LoomSvg({
       if (current) {
         out.push({
           d: current,
-          color: paletteResolved[currentColor] ?? "#f4efe5",
+          color: paletteResolved[currentColor] ?? DEFAULT_THREAD,
         });
         current = "";
         lengthInRun = 0;
@@ -104,40 +104,37 @@ export function LoomSvg({
       className="block h-full w-full"
     >
       <defs>
-        <radialGradient id="loom-dark-build" cx="50%" cy="50%" r="65%">
-          <stop offset="0%" stopColor="#151411" />
-          <stop offset="100%" stopColor="#0b0a09" />
+        <radialGradient id="loom-cream-build" cx="50%" cy="50%" r="65%">
+          <stop offset="0%" stopColor="#fbf7ee" />
+          <stop offset="100%" stopColor="#eee6d6" />
         </radialGradient>
       </defs>
 
-      {/* Dark disc */}
+      {/* Cream disc */}
       <circle
         cx={cx}
         cy={cy}
         r={size / 2 - 3}
-        fill="url(#loom-dark-build)"
+        fill="url(#loom-cream-build)"
         stroke="#141311"
         strokeWidth={1}
       />
 
-      {/* Thread. Mono uses screen blend so cream accumulates on the dark
-          disc the same way the Compose canvas does; multi-color uses plain
-          source-over so darker threads still render visibly. */}
+      {/* Thread. Multiply blend so stacked dark crossings progressively
+          darken the cream the way physical string art does. */}
       <g
         strokeOpacity={0.42}
         strokeWidth={0.6}
         strokeLinecap="round"
         fill="none"
-        style={multiColor ? undefined : { mixBlendMode: "screen" }}
+        style={{ mixBlendMode: "multiply" }}
       >
         {batches.map((batch, i) => (
           <path key={i} d={batch.d} stroke={batch.color} />
         ))}
       </g>
 
-      {/* Guide line to next nail. In mono mode the accent orange is the
-          only distinctive color available; in multi-color solves we use
-          the actual thread color the builder should grab next. */}
+      {/* Guide line to next nail in accent color. */}
       {currentPin !== undefined && nextPin !== undefined ? (
         <line
           x1={pinPositions[currentPin * 2] ?? 0}
@@ -159,7 +156,7 @@ export function LoomSvg({
         const isPrevious = i === previousPin;
         const isNext = i === nextPin;
         if (isCurrent) {
-          return <circle key={i} cx={x} cy={y} r={5} fill="#F4EFE5" />;
+          return <circle key={i} cx={x} cy={y} r={5} fill="#141311" />;
         }
         if (isNext) {
           return (
@@ -197,13 +194,13 @@ export function LoomSvg({
             cx={x}
             cy={y}
             r={isPrevious ? 2.8 : 1.4}
-            fill="#F4EFE5"
+            fill="#141311"
             fillOpacity={isPrevious ? 0.85 : 0.35}
           />
         );
       })}
 
-      {/* Labels, every tenth pin, outside the disc in muted light */}
+      {/* Labels, every tenth pin, outside the disc in muted dark */}
       {Array.from({ length: pinCount }, (_, i) => {
         if (i % LABEL_EVERY !== 0) return null;
         const x = pinPositions[i * 2] ?? 0;
@@ -218,8 +215,8 @@ export function LoomSvg({
             x={lx}
             y={ly}
             fontSize={12}
-            fill="#F4EFE5"
-            fillOpacity={0.35}
+            fill="#141311"
+            fillOpacity={0.55}
             textAnchor="middle"
             dominantBaseline="middle"
             fontFamily="Berkeley Mono, ui-monospace, monospace"

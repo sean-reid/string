@@ -2,7 +2,7 @@ const STROKE = "#141311";
 const ACCENT = "#D4541F";
 const MUTED = "#6B6762";
 const LINE = "#e7e3db";
-const DARK = "#0e0d0b";
+const CREAM = "#f4efe5";
 
 const W = 180;
 const H = 140;
@@ -55,7 +55,9 @@ export function BoardArt() {
       {/* Paint sweep already applied (left half) */}
       <path
         d="M54 32 A38 38 0 0 0 54 108 Z"
-        fill={DARK}
+        fill={CREAM}
+        stroke={STROKE}
+        strokeWidth="0.6"
       />
       {/* Sanding marks on bare side */}
       <g stroke={MUTED} strokeWidth="0.5" opacity="0.6">
@@ -91,14 +93,16 @@ export function BoardArt() {
         />
         <path
           d="M40 14 L54 10 L54 22 L40 20 Z"
-          fill={DARK}
+          fill={CREAM}
           stroke={STROKE}
           strokeWidth="0.6"
         />
         {/* Drip */}
         <path
           d="M52 22 Q54 28 52 32 Q50 28 52 22"
-          fill={DARK}
+          fill={CREAM}
+          stroke={STROKE}
+          strokeWidth="0.4"
         />
       </g>
 
@@ -141,8 +145,8 @@ export function NailsArt() {
         strokeDasharray="3 2"
         strokeWidth="0.8"
       />
-      {/* Dark painted disc */}
-      <circle cx={cx} cy={cy} r={R} fill={DARK} />
+      {/* Cream painted disc */}
+      <circle cx={cx} cy={cy} r={R} fill={CREAM} stroke={STROKE} strokeWidth="0.8" />
 
       {/* Nails at every position: accent for registration (every 10th) */}
       {Array.from({ length: N }, (_, i) => {
@@ -154,7 +158,7 @@ export function NailsArt() {
           return (
             <g key={i}>
               <circle cx={px} cy={py} r="2.4" fill={ACCENT} />
-              <circle cx={px} cy={py} r="0.8" fill={DARK} />
+              <circle cx={px} cy={py} r="0.8" fill={STROKE} />
             </g>
           );
         }
@@ -164,8 +168,8 @@ export function NailsArt() {
             cx={px}
             cy={py}
             r="1"
-            fill="#f4efe5"
-            fillOpacity="0.7"
+            fill={STROKE}
+            fillOpacity="0.55"
           />
         );
       })}
@@ -359,22 +363,22 @@ export function WeaveArt() {
 
   return (
     <Frame>
-      {/* Dark surface */}
-      <rect x="0" y="0" width={W} height={H} fill={DARK} rx="2" />
+      {/* Cream surface */}
+      <rect x="0" y="0" width={W} height={H} fill={CREAM} rx="2" />
 
       {/* Existing thread from before (behind A) */}
       <path
         d={`M4 110 L${A.x - 6} ${A.y - 3}`}
-        stroke="#f4efe5"
-        strokeOpacity="0.55"
+        stroke={STROKE}
+        strokeOpacity="0.45"
         strokeWidth="1"
         strokeLinecap="round"
       />
       {/* Line from A to B (previous line, lighter) */}
       <path
         d={`M${A.x} ${A.y} L${B.x} ${B.y}`}
-        stroke="#f4efe5"
-        strokeOpacity="0.7"
+        stroke={STROKE}
+        strokeOpacity="0.55"
         strokeWidth="1"
         strokeLinecap="round"
       />
@@ -408,8 +412,8 @@ export function WeaveArt() {
       {/* Nails */}
       {[A, B, C].map((p, i) => (
         <g key={i}>
-          <circle cx={p.x} cy={p.y} r="3.2" fill="#f4efe5" />
-          <circle cx={p.x} cy={p.y} r="1.4" fill={DARK} />
+          <circle cx={p.x} cy={p.y} r="3.2" fill={STROKE} />
+          <circle cx={p.x} cy={p.y} r="1.2" fill={CREAM} />
         </g>
       ))}
       {/* Highlight current nail */}
@@ -427,7 +431,7 @@ export function WeaveArt() {
         x={A.x - 4}
         y={A.y + 18}
         fontSize="8"
-        fill="#f4efe5"
+        fill={STROKE}
         fillOpacity="0.6"
         fontFamily="Berkeley Mono, ui-monospace, monospace"
       >
@@ -446,7 +450,7 @@ export function WeaveArt() {
         x={C.x - 4}
         y={C.y + 18}
         fontSize="8"
-        fill="#f4efe5"
+        fill={STROKE}
         fillOpacity="0.6"
         fontFamily="Berkeley Mono, ui-monospace, monospace"
       >
@@ -456,7 +460,100 @@ export function WeaveArt() {
   );
 }
 
-/** Step 5: last nail with wraps, knot, glue. */
+/** Step 5: continuous thread entering from the top, wrapping nail 1 with a
+ *  visible hook-loop on its LEFT, crossing between the nails, then wrapping
+ *  nail 2 with a hook-loop on its RIGHT, exiting back to the top. Matches
+ *  the hand-sketched reference: two tails at top, loops bulging out on the
+ *  opposite outer sides of each nail. */
+export function WrapArt() {
+  const R = 4.5;
+  const n1 = { x: 70, y: 82 };
+  const n2 = { x: 110, y: 82 };
+
+  // One continuous stroke. Bezier controls tuned so each hook visibly
+  // bulges past the outer edge of its nail.
+  const d = `
+    M 62 14
+    Q 62 46 ${n1.x - 1} ${n1.y - R - 1}
+    C ${n1.x - R - 16} ${n1.y - 3}
+      ${n1.x - R - 14} ${n1.y + R + 12}
+      ${n1.x + 2} ${n1.y + R + 5}
+    Q ${(n1.x + n2.x) / 2} ${n1.y + R + 11} ${n2.x - 2} ${n2.y + R + 5}
+    C ${n2.x + R + 14} ${n2.y + R + 12}
+      ${n2.x + R + 16} ${n2.y - 3}
+      ${n2.x + 1} ${n2.y - R - 1}
+    Q ${W - 62} 46 ${W - 62} 14
+  `;
+
+  return (
+    <Frame>
+      <path
+        d={d}
+        fill="none"
+        stroke={STROKE}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+
+      {/* Nails drawn on top so their heads sit cleanly over the thread */}
+      {[n1, n2].map((p, i) => (
+        <g key={i}>
+          <circle cx={p.x} cy={p.y} r={R} fill="#c8c2b5" stroke={STROKE} strokeWidth="0.8" />
+          <circle cx={p.x} cy={p.y} r="1.3" fill={STROKE} />
+        </g>
+      ))}
+
+      {/* Accent dots on the outer side of each hook */}
+      <circle cx={n1.x - R - 10} cy={n1.y + 4} r="1.9" fill={ACCENT} />
+      <circle cx={n2.x + R + 10} cy={n2.y + 4} r="1.9" fill={ACCENT} />
+
+      {/* Labels */}
+      <text
+        x={W / 2}
+        y="20"
+        fontSize="9"
+        fill={STROKE}
+        textAnchor="middle"
+        fontFamily="Berkeley Mono, ui-monospace, monospace"
+      >
+        alternate the wrap side
+      </text>
+      <text
+        x={n1.x - R - 10}
+        y={n1.y + R + 18}
+        fontSize="7"
+        fill={ACCENT}
+        textAnchor="middle"
+        fontFamily="Berkeley Mono, ui-monospace, monospace"
+      >
+        left
+      </text>
+      <text
+        x={n2.x + R + 10}
+        y={n2.y + R + 18}
+        fontSize="7"
+        fill={ACCENT}
+        textAnchor="middle"
+        fontFamily="Berkeley Mono, ui-monospace, monospace"
+      >
+        right
+      </text>
+      <text
+        x={W / 2}
+        y={H - 6}
+        fontSize="8"
+        fill={MUTED}
+        textAnchor="middle"
+        fontFamily="Berkeley Mono, ui-monospace, monospace"
+      >
+        one nail left, the next right, back and forth
+      </text>
+    </Frame>
+  );
+}
+
+/** Step 6: last nail with wraps, knot, glue. */
 export function FinishArt() {
   return (
     <Frame>
@@ -598,10 +695,10 @@ export function TroubleArt() {
   return (
     <Frame>
       {/* Disc */}
-      <circle cx={cx} cy={cy} r={R} fill={DARK} />
+      <circle cx={cx} cy={cy} r={R} fill={CREAM} stroke={STROKE} strokeWidth="0.8" />
 
-      {/* Prior correct lines, soft white */}
-      <g stroke="#f4efe5" strokeOpacity="0.55" strokeWidth="0.9" fill="none">
+      {/* Prior correct lines, soft dark */}
+      <g stroke={STROKE} strokeOpacity="0.45" strokeWidth="0.9" fill="none">
         {good.map(([a, b], i) => {
           const pa = pin(a);
           const pb = pin(b);
@@ -641,8 +738,8 @@ export function TroubleArt() {
               cx={p.x}
               cy={p.y}
               r={flagged ? 2 : 1}
-              fill={flagged ? ACCENT : "#f4efe5"}
-              fillOpacity={flagged ? 1 : 0.6}
+              fill={flagged ? ACCENT : STROKE}
+              fillOpacity={flagged ? 1 : 0.5}
             />
             {flagged ? (
               <circle
@@ -661,8 +758,8 @@ export function TroubleArt() {
       {/* Ring-back arrow: arcs from the wrong nail back to the correct one */}
       <g
         fill="none"
-        stroke="#f4efe5"
-        strokeOpacity="0.85"
+        stroke={STROKE}
+        strokeOpacity="0.75"
         strokeLinecap="round"
         strokeLinejoin="round"
       >
