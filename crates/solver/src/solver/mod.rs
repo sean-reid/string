@@ -400,24 +400,18 @@ impl Solver {
         Some(candidates.last().unwrap().0)
     }
 
-    /// For a chord chosen in color mode, pick which palette thread
-    /// to draw it in. Splits the chord's demand into a chromatic
-    /// component (what hue does this region want?) and an achromatic
-    /// component (just uniform darkening?), and routes accordingly:
+    /// For a chord chosen in color mode, pick the palette thread
+    /// whose color is closest to the chord's average target color
+    /// (squared distance in linear RGB).
     ///
-    /// - If the chromatic ratio is meaningful, match the chromatic
-    ///   sum against each thread's chromatic basis. Colored threads
-    ///   with non-zero chroma compete fairly on hue; black, with
-    ///   near-zero chromatic basis, naturally scores low here.
-    /// - If the chord is essentially uniform-dark, pick the least-
-    ///   chromatic thread (typically black).
-    ///
-    /// This is what lets colored threads win on face regions: black
-    /// loses the chromatic-match test because its darkening basis
-    /// has no direction, only magnitude. A raw `b · basis / |basis|`
-    /// compare would always favor black simply because `b` has a
-    /// uniform-positive component that aligns with black's
-    /// uniform-positive basis.
+    /// This is perceptual matching: "chord's average target is a
+    /// warm-skin color → pick the nearest warm thread; average is
+    /// near-black → pick black." Basis-alignment metrics got fooled
+    /// by black's large raw magnitude and either over- or
+    /// under-picked it; matching on thread *color* puts black at
+    /// the right squared-distance from any demand and lets colored
+    /// threads win only when they genuinely are the closest thread
+    /// to the chord's average hue.
     fn pick_chord_color(
         &self,
         target_offset: &[f32],
@@ -426,6 +420,7 @@ impl Solver {
         p1: (f32, f32),
     ) -> u8 {
         let mut sum = [0.0f32; 3];
+        let mut weight = 0.0f32;
         chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, self.width, self.height, |idx, c| {
             let w = self.weights[idx];
             let cw = c * w;
@@ -433,62 +428,33 @@ impl Solver {
             sum[0] += target_offset[base] * cw;
             sum[1] += target_offset[base + 1] * cw;
             sum[2] += target_offset[base + 2] * cw;
+            weight += cw;
         });
-
-        if sum[0] + sum[1] + sum[2] <= 1e-8 {
+        if weight <= 1e-6 {
             return 0;
         }
+        // Average target color along the chord in linear RGB.
+        // target = board − target_offset, so avg_target = board − avg_offset.
+        let avg_target = [
+            BOARD_LINEAR[0] - sum[0] / weight,
+            BOARD_LINEAR[1] - sum[1] / weight,
+            BOARD_LINEAR[2] - sum[2] / weight,
+        ];
 
-        // Chromatic component of the chord's accumulated demand.
-        let s_min = sum[0].min(sum[1]).min(sum[2]);
-        let chrom = [sum[0] - s_min, sum[1] - s_min, sum[2] - s_min];
-
-        // Match colored threads by chromatic-basis alignment only.
-        // A thread with near-zero chromatic basis (black) drops out
-        // because its bc_mag_sq is tiny; colored threads compete
-        // here on hue match, not on raw magnitude. No gate: any
-        // nonzero positive chromatic alignment is enough to prefer
-        // a colored thread over the achromatic fallback.
-        let mut best_color: Option<(u8, f32)> = None;
-        for (i, basis) in thread_basis.iter().enumerate() {
-            let b_min = basis[0].min(basis[1]).min(basis[2]);
-            let bc = [basis[0] - b_min, basis[1] - b_min, basis[2] - b_min];
-            let bc_mag_sq = bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2];
-            if bc_mag_sq <= 1e-6 {
-                continue;
-            }
-            let dot = chrom[0] * bc[0] + chrom[1] * bc[1] + chrom[2] * bc[2];
-            if dot <= 0.0 {
-                continue;
-            }
-            let aligned = dot / bc_mag_sq.sqrt();
-            match best_color {
-                None => best_color = Some((i as u8, aligned)),
-                Some((_, prev)) if aligned > prev => best_color = Some((i as u8, aligned)),
-                _ => {}
-            }
-        }
-        if let Some((i, _)) = best_color {
-            return i;
-        }
-
-        // Achromatic demand: pick the thread whose basis has the
-        // smallest chromatic component relative to its magnitude —
-        // that's the closest to "pure darkness" in the palette,
-        // which is what a uniform-dark chord needs.
+        // Closest-thread-in-linear-RGB search.
         let mut best = 0u8;
-        let mut best_chroma_ratio = f32::INFINITY;
+        let mut best_dist = f32::INFINITY;
         for (i, basis) in thread_basis.iter().enumerate() {
-            let mag_sq = basis[0] * basis[0] + basis[1] * basis[1] + basis[2] * basis[2];
-            if mag_sq <= 1e-6 {
-                continue;
-            }
-            let b_min = basis[0].min(basis[1]).min(basis[2]);
-            let bc = [basis[0] - b_min, basis[1] - b_min, basis[2] - b_min];
-            let bc_mag_sq = bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2];
-            let ratio = bc_mag_sq / mag_sq;
-            if ratio < best_chroma_ratio {
-                best_chroma_ratio = ratio;
+            // thread color = board − basis.
+            let tr = BOARD_LINEAR[0] - basis[0];
+            let tg = BOARD_LINEAR[1] - basis[1];
+            let tb = BOARD_LINEAR[2] - basis[2];
+            let dr = avg_target[0] - tr;
+            let dg = avg_target[1] - tg;
+            let db = avg_target[2] - tb;
+            let dist = dr * dr + dg * dg + db * db;
+            if dist < best_dist {
+                best_dist = dist;
                 best = i as u8;
             }
         }
