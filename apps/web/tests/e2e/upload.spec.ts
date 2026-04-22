@@ -128,23 +128,21 @@ test.describe("upload and decode", () => {
 
     await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 60_000 });
 
-    // Capture the final canvas image-data hash-like fingerprint so the test
-    // fails loudly on a blank canvas.
-    const sampled = await stage.locator("canvas").nth(1).evaluate((el) => {
+    // Smoke-check the lines canvas has non-transparent pixels somewhere —
+    // fails loudly on a blank canvas, but doesn't assume a specific region
+    // receives coverage at small line budgets.
+    const nonTransparent = await stage.locator("canvas").nth(1).evaluate((el) => {
       const c = el as HTMLCanvasElement;
       const ctx = c.getContext("2d");
       if (!ctx) return 0;
-      const data = ctx.getImageData(
-        Math.floor(c.width * 0.4),
-        Math.floor(c.height * 0.4),
-        Math.floor(c.width * 0.2),
-        Math.floor(c.height * 0.2),
-      ).data;
-      let acc = 0;
-      for (let i = 0; i < data.length; i += 40) acc = (acc + data[i]!) & 0xffff;
-      return acc;
+      const { data } = ctx.getImageData(0, 0, c.width, c.height);
+      let count = 0;
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i]! > 0) count++;
+      }
+      return count;
     });
-    expect(sampled).toBeGreaterThan(0);
+    expect(nonTransparent).toBeGreaterThan(0);
   });
 
   test("rejects non-image files with a friendly message", async ({ page }) => {
