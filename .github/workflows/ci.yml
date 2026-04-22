@@ -93,29 +93,34 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/solver
-      - name: install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: pnpm install
-        run: pnpm install --frozen-lockfile
-      - name: solver build
-        run: pnpm solver:build
-      - name: build web
-        run: pnpm --filter web build
-      - name: install playwright browsers
+      - name: resolve browser
+        id: browser
         run: |
           case "${{ matrix.project }}" in
-            mobile-safari) browser=webkit ;;
-            firefox) browser=firefox ;;
-            *) browser=chromium ;;
+            mobile-safari) echo "id=webkit" >> "$GITHUB_OUTPUT" ;;
+            firefox) echo "id=firefox" >> "$GITHUB_OUTPUT" ;;
+            *) echo "id=chromium" >> "$GITHUB_OUTPUT" ;;
           esac
-          pnpm --filter web exec playwright install --with-deps "$browser"
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: cache playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ steps.browser.outputs.id }}
+      - name: install playwright browsers
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            pnpm --filter web exec playwright install-deps ${{ steps.browser.outputs.id }}
+          else
+            pnpm --filter web exec playwright install --with-deps ${{ steps.browser.outputs.id }}
+          fi
+      - name: download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
       - name: run playwright
         run: pnpm --filter web exec playwright test --project=${{ matrix.project }}
       - name: upload report
