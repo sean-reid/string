@@ -15,8 +15,9 @@ impl Palette {
     /// Build a palette from a flat buffer of sRGB bytes (length must be a
     /// positive multiple of 3). Each triple becomes one palette entry in
     /// linear RGB.
+    #[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable on MSRV 1.83
     pub fn from_srgb_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.is_empty() || !bytes.len().is_multiple_of(3) {
+        if bytes.is_empty() || bytes.len() % 3 != 0 {
             return Err("palette must be a non-empty multiple of 3 bytes (rgb)");
         }
         if bytes.len() / 3 > u8::MAX as usize {
