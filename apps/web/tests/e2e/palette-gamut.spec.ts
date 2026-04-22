@@ -14,7 +14,28 @@ function rec709(rgb: [number, number, number]): number {
   return 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255);
 }
 
-test("auto palette is face-driven and ordered dark to light", async ({ page }) => {
+/** Sum of pairwise squared distances between palette entries in RGB
+ *  space, normalized to [0,1]. A value near zero means every slot is
+ *  the same hue; a value close to 1 indicates a gamut-spanning mix. */
+function paletteSpread(hexes: string[]): number {
+  const rgbs = hexes.map(hexToRgb);
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < rgbs.length; i += 1) {
+    for (let j = i + 1; j < rgbs.length; j += 1) {
+      const dr = (rgbs[i][0] - rgbs[j][0]) / 255;
+      const dg = (rgbs[i][1] - rgbs[j][1]) / 255;
+      const db = (rgbs[i][2] - rgbs[j][2]) / 255;
+      sum += dr * dr + dg * dg + db * db;
+      count += 1;
+    }
+  }
+  return count === 0 ? 0 : sum / count;
+}
+
+test("auto palette spans the image gamut and layers dark to light", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1400, height: 1000 });
   await page.goto("/");
@@ -44,6 +65,8 @@ test("auto palette is face-driven and ordered dark to light", async ({ page }) =
     .filter((h): h is string => !!h);
 
   console.log("auto swatches:", hexes);
+  const spread = paletteSpread(hexes);
+  console.log("palette spread:", spread);
 
   await page.screenshot({
     path: "test-results/palette-gamut-rail.png",
@@ -52,8 +75,13 @@ test("auto palette is face-driven and ordered dark to light", async ({ page }) =
 
   expect(hexes.length).toBe(6);
 
-  // Palette must be ordered ascending in luminance — the builder lays
-  // dark threads first so bright highlights stack on top.
+  // Palette must meaningfully span the RGB cube, not collapse to a
+  // single hue. An empirical floor of 0.15 rejects all-salmon-variations
+  // outputs while staying below typical real-photo values (~0.25-0.4).
+  expect(spread).toBeGreaterThan(0.15);
+
+  // And it must be ordered ascending in luminance — dark threads go
+  // down first so bright highlights stack on top.
   const luminances = hexes.map((h) => rec709(hexToRgb(h)));
   for (let i = 1; i < luminances.length; i += 1) {
     expect(luminances[i]).toBeGreaterThanOrEqual(luminances[i - 1] - 0.01);

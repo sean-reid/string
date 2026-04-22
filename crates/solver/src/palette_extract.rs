@@ -1,41 +1,34 @@
 //! Palette extraction for a photo, tuned for **additive reconstruction**
 //! on a dark board.
 //!
-//! The problem a naive "dominant image colors" method runs into on
-//! a portrait with a sky background: the sky is a huge fraction of
-//! pixels, so k-means / quantization / any volume-based method ranks
-//! blue near the top. That produces a "blue thread", and the solver
-//! — seeing lots of blue pixels to cover — spends a huge share of
-//! its line budget on the sky while the face goes under-represented.
+//! The extraction is **Tan et al. 2016** ("Decomposing Images into
+//! Layers via RGB-space Geometry") in spirit: the palette is a small
+//! set of vertices whose convex hull encloses the image's pixel
+//! distribution in linear RGB. We approximate full hull-simplification
+//! with **farthest-point sampling** (Gonzalez 1985) — slot 0 is the
+//! brightest image sample, each subsequent slot is the sample with
+//! maximum minimum-distance to the already-picked set. FPS provably
+//! picks hull vertices, which is what Tan's convex-hull simplification
+//! converges to; running it in linear RGB means every pick is a real
+//! image color.
 //!
-//! The fix is to treat palette extraction as a **subject-aware**
-//! operation. When a face box is known, samples outside the face get
-//! heavily down-weighted before any extrema search happens; the sky
-//! samples are still in the pool, but their importance is near zero,
-//! so they cannot win hull vertices in the simplification.
+//! Palette extraction is deliberately **not face-weighted**. The job of
+//! the palette is to span the image's gamut so the additive combination
+//! of threads can reconstruct any pixel. Face-biasing the palette
+//! collapses it to a single hue on portraits (all warm-skin variations),
+//! losing the chromatic diversity needed to paint shadows, lips, eyes,
+//! and other off-hue regions. Concentrating strings on the face is a
+//! **budget-allocation** problem, handled in `solver::weight` by
+//! suppressing non-face importance — so palette diversity and subject
+//! focus are orthogonal concerns, solved independently.
 //!
-//! The extraction itself is **Tan et al. 2016** ("Decomposing Images
-//! into Layers via RGB-space Geometry") in spirit: the palette is a
-//! small set of vertices whose convex hull encloses the image's
-//! relevant pixel distribution in linear RGB. We approximate the
-//! full hull-simplification with a cheap and well-known substitute —
-//! **farthest-point sampling** (Gonzalez 1985) on the weighted
-//! sample cloud. Slot 0 is the brightest weighted sample; each
-//! subsequent slot is the sample that maximizes
-//! `min_euclidean_distance_to_picked * importance`. FPS provably
-//! picks hull vertices, which is exactly what Tan's algorithm
-//! converges to; running it in linear RGB means every pick is a
-//! real image color (no synthetic primaries to drift off-hue).
+//! k=1 is an aesthetic exception: palette-of-one returns the
+//! traditional `#f4efe5` cream verbatim regardless of image content.
 //!
-//! Applied on the face-weighted pool, this yields a palette whose
-//! non-negative combinations reproduce the **face**'s gamut — blue
-//! sky thread only appears if blue is present in the face region
-//! (eye irises, rim light, shadow, jewelry), which is when the user
-//! actually wants it.
-//!
-//! k=1 is a deliberate exception: palette-of-one is the aesthetic
-//! mono path and returns the traditional `#f4efe5` cream verbatim
-//! regardless of image content.
+//! The palette is returned ordered ascending in Rec.709 luminance. The
+//! solver processes colors sequentially, so dark threads get laid down
+//! first and bright highlights stack on top — standard practice on a
+//! dark board.
 
 use crate::solver::palette::srgb_to_linear;
 use crate::solver::weight::FaceBox;
@@ -48,11 +41,6 @@ const MAX_K: usize = 8;
 /// tends to use.
 const CREAM_SRGB: [u8; 3] = [0xF4, 0xEF, 0xE5];
 
-/// Target linear magnitude for saturation-boosted palette entries. We
-/// leave a touch of headroom below 1.0 so boosted colors still look
-/// like thread rather than digital neon.
-const HUE_BOOST_TARGET: f32 = 0.95;
-
 /// Rec.709 luminance of the dark disc the threads sit on. Samples at
 /// or near this luminance contribute no usable light.
 const BOARD_LUMINANCE: f32 = 0.003_631;
@@ -60,25 +48,10 @@ const BOARD_LUMINANCE: f32 = 0.003_631;
 /// eligible as a palette vertex.
 const MIN_PALETTE_MARGIN: f32 = 0.05;
 
-/// Importance floor for samples outside the face gaussian. Non-zero so
-/// the pool is never empty on a portrait where the face detection is
-/// slightly off; small enough that a sky or background pixel can't
-/// outrun a face-region pick on the `dist * importance` score.
-const BACKGROUND_FLOOR: f32 = 0.03;
-/// Peak importance (face center) when a face box is provided.
-const FACE_PEAK: f32 = 1.0;
-/// Gaussian radius multiplier for palette sampling. Tighter than the
-/// solver's scoring gaussian (1.2× there) because palette extraction
-/// needs a strong inside-vs-outside separation: a saturated outlier
-/// like a blue sky has ~4× the color-space distance of any
-/// inside-face vertex, so even a modestly-high weight just outside
-/// the face is enough for it to outrank real face vertices. A 0.6×
-/// sigma keeps the falloff mostly inside the face box.
-const FACE_SIGMA_MUL: f32 = 0.6;
-
-/// Public entry point. `face` weights the sample pool so palette
-/// picks come from the face region when one is known; pass `None` to
-/// treat every sample equally.
+/// Public entry point. `face` is accepted for future face-aware
+/// variants but is currently unused — palette extraction spans the
+/// full image gamut so color diversity is preserved on portraits.
+/// Subject focus is enforced by `solver::weight`, not here.
 pub fn extract_palette_bytes(
     rgba: &[u8],
     size: usize,
@@ -95,21 +68,16 @@ pub fn extract_palette_bytes(
     if k == 1 {
         return Ok(CREAM_SRGB.to_vec());
     }
+    let _ = face;
 
-    let weighted = downsample_weighted(rgba, size, face);
-    if weighted.is_empty() {
+    let samples = downsample_linear_rgb(rgba, size);
+    if samples.is_empty() {
         return Ok(CREAM_SRGB.repeat(k));
     }
 
-    let pool = above_board_or_all(&weighted);
+    let pool = above_board_or_all(&samples);
     let picks = farthest_point_sampling(&pool, k);
-    let boosted = boost_palette(picks);
-    // Build order: darkest thread first, brightest last. On a dark
-    // board the builder lays the low-luminance threads down first so
-    // the bright highlights stack on top and aren't obscured by
-    // subsequent passes. Stable sort so ties (e.g. two similarly-dark
-    // hues) keep the FPS-discovery order.
-    let ordered = order_for_build(boosted);
+    let ordered = order_for_build(picks);
     let _ = seed;
     Ok(linear_to_srgb_bytes(&ordered))
 }
@@ -128,25 +96,14 @@ fn order_for_build(mut palette: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
     palette
 }
 
-/// One downsampled sample: color in linear RGB + an importance weight
-/// from the face gaussian (or uniform when no face is known).
-#[derive(Clone, Copy)]
-struct WeightedSample {
-    color: [f32; 3],
-    weight: f32,
-}
-
-/// Tile-average the input to `SAMPLE_DIM × SAMPLE_DIM` and attach each
-/// tile's mean face-importance weight. A face-weighted sample cloud
-/// is what keeps sky pixels from dominating the subsequent FPS.
-fn downsample_weighted(rgba: &[u8], size: usize, face: Option<FaceBox>) -> Vec<WeightedSample> {
+/// Tile-average the input to `SAMPLE_DIM × SAMPLE_DIM` in linear RGB.
+fn downsample_linear_rgb(rgba: &[u8], size: usize) -> Vec<[f32; 3]> {
     let tile = size.max(SAMPLE_DIM) / SAMPLE_DIM;
     let dim = (size / tile).max(1);
     let mut out = Vec::with_capacity(dim * dim);
     for ty in 0..dim {
         for tx in 0..dim {
             let mut sum = [0.0f32; 3];
-            let mut wsum = 0.0f32;
             let mut n = 0u32;
             let y_start = ty * tile;
             let x_start = tx * tile;
@@ -159,42 +116,24 @@ fn downsample_weighted(rgba: &[u8], size: usize, face: Option<FaceBox>) -> Vec<W
                     sum[0] += srgb_to_linear(rgba[base] as f32 / 255.0);
                     sum[1] += srgb_to_linear(rgba[base + 1] as f32 / 255.0);
                     sum[2] += srgb_to_linear(rgba[base + 2] as f32 / 255.0);
-                    wsum += sample_weight(face, x as f32, y as f32);
                     n += 1;
                 }
             }
             if n > 0 {
                 let inv = 1.0 / n as f32;
-                out.push(WeightedSample {
-                    color: [sum[0] * inv, sum[1] * inv, sum[2] * inv],
-                    weight: wsum * inv,
-                });
+                out.push([sum[0] * inv, sum[1] * inv, sum[2] * inv]);
             }
         }
     }
     out
 }
 
-fn sample_weight(face: Option<FaceBox>, x: f32, y: f32) -> f32 {
-    let Some(face) = face else {
-        return FACE_PEAK;
-    };
-    let cx = face.x + face.w * 0.5;
-    let cy = face.y + face.h * 0.5;
-    let sx = (face.w * 0.5 * FACE_SIGMA_MUL).max(1.0);
-    let sy = (face.h * 0.5 * FACE_SIGMA_MUL).max(1.0);
-    let dx = (x - cx) / sx;
-    let dy = (y - cy) / sy;
-    let g = (-0.5 * (dx * dx + dy * dy)).exp();
-    BACKGROUND_FLOOR + (FACE_PEAK - BACKGROUND_FLOOR) * g
-}
-
-fn above_board_or_all(samples: &[WeightedSample]) -> Vec<WeightedSample> {
+fn above_board_or_all(samples: &[[f32; 3]]) -> Vec<[f32; 3]> {
     let threshold = BOARD_LUMINANCE + MIN_PALETTE_MARGIN;
-    let filtered: Vec<WeightedSample> = samples
+    let filtered: Vec<[f32; 3]> = samples
         .iter()
         .copied()
-        .filter(|s| rec709(s.color) > threshold)
+        .filter(|c| rec709(*c) > threshold)
         .collect();
     if filtered.is_empty() {
         samples.to_vec()
@@ -203,14 +142,12 @@ fn above_board_or_all(samples: &[WeightedSample]) -> Vec<WeightedSample> {
     }
 }
 
-/// Farthest-point sampling in linear RGB. Slot 0 is the weighted
-/// brightness extreme (importance-scaled Rec.709 luminance); each
-/// subsequent slot is the sample that maximizes
-/// `min_distance_to_picked * importance`. This is Tan-simplification's
-/// practical approximation: FPS provably converges to hull vertices,
-/// and importance weighting keeps sky / background from winning any
-/// slot when a face box is present.
-fn farthest_point_sampling(pool: &[WeightedSample], k: usize) -> Vec<[f32; 3]> {
+/// Farthest-point sampling in linear RGB. Slot 0 is the brightest
+/// sample (Rec.709 luminance); each subsequent slot is the sample
+/// with maximum minimum-distance to the already-picked set. FPS
+/// provably picks hull vertices, giving a k-simplex that encloses
+/// the image's gamut.
+fn farthest_point_sampling(pool: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
     if pool.is_empty() {
         return Vec::new();
     }
@@ -218,48 +155,40 @@ fn farthest_point_sampling(pool: &[WeightedSample], k: usize) -> Vec<[f32; 3]> {
     let mut min_dist: Vec<f32> = vec![f32::INFINITY; pool.len()];
 
     let mut slot0 = 0usize;
-    let mut best_score = f32::NEG_INFINITY;
-    for (i, s) in pool.iter().enumerate() {
-        let score = rec709(s.color) * s.weight;
-        if score > best_score {
-            best_score = score;
+    let mut best_lum = f32::NEG_INFINITY;
+    for (i, c) in pool.iter().enumerate() {
+        let lum = rec709(*c);
+        if lum > best_lum {
+            best_lum = lum;
             slot0 = i;
         }
     }
-    picks.push(pool[slot0].color);
-    update_min_dist(pool, pool[slot0].color, &mut min_dist);
+    picks.push(pool[slot0]);
+    update_min_dist(pool, pool[slot0], &mut min_dist);
 
     while picks.len() < k {
         let mut best = 0usize;
         let mut best_score = f32::NEG_INFINITY;
-        for (i, s) in pool.iter().enumerate() {
-            // Score uses linear distance, not squared. Squared distance
-            // gives a saturated-primary outlier a quartic advantage
-            // over a closer face-region vertex, which lets background
-            // blues win even with 0.1× importance. Linear distance
-            // keeps the `distance × importance` trade-off balanced.
-            let score = min_dist[i].sqrt() * s.weight;
-            if score > best_score {
-                best_score = score;
+        for (i, _) in pool.iter().enumerate() {
+            if min_dist[i] > best_score {
+                best_score = min_dist[i];
                 best = i;
             }
         }
         if best_score <= 0.0 {
             // Pool exhausted (duplicate samples or k > unique colors).
-            // Pad with the last pick so callers still get k entries;
-            // the saturation-boost step pulls each to its hue extreme.
             picks.push(*picks.last().unwrap());
             continue;
         }
-        picks.push(pool[best].color);
-        update_min_dist(pool, pool[best].color, &mut min_dist);
+        picks.push(pool[best]);
+        update_min_dist(pool, pool[best], &mut min_dist);
     }
     picks
 }
 
-fn update_min_dist(pool: &[WeightedSample], picked: [f32; 3], min_dist: &mut [f32]) {
-    for (i, s) in pool.iter().enumerate() {
-        let d = sq_distance(s.color, picked);
+fn update_min_dist(pool: &[[f32; 3]], picked: [f32; 3], min_dist: &mut [f32]) {
+    for (i, c) in pool.iter().enumerate() {
+        let d = sq_distance(*c, picked);
         if d < min_dist[i] {
             min_dist[i] = d;
         }
@@ -271,23 +200,6 @@ fn sq_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dg = a[1] - b[1];
     let db = a[2] - b[2];
     dr * dr + dg * dg + db * db
-}
-
-fn boost_palette(palette: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
-    palette.into_iter().map(boost_entry).collect()
-}
-
-fn boost_entry(c: [f32; 3]) -> [f32; 3] {
-    let max = c[0].max(c[1]).max(c[2]);
-    if max <= 1e-4 {
-        return c;
-    }
-    let scale = HUE_BOOST_TARGET / max;
-    [
-        (c[0] * scale).min(HUE_BOOST_TARGET),
-        (c[1] * scale).min(HUE_BOOST_TARGET),
-        (c[2] * scale).min(HUE_BOOST_TARGET),
-    ]
 }
 
 fn rec709(c: [f32; 3]) -> f32 {
@@ -382,13 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn face_box_biases_palette_toward_face_colors() {
-        // Background is saturated blue, face region spans two warm
-        // hues (highlight + midtone). Without face weighting, FPS is
-        // dominated by the background: slot 0 is the bright blue
-        // extreme. With face weighting, slot 0 comes from the warm
-        // face region instead — which is the critical property for
-        // the solver's per-color budget to favor face over sky.
+    fn palette_spans_gamut_including_background_extremes() {
+        // A portrait with warm face + saturated sky. The palette must
+        // include both extremes as hull vertices so the solver has a
+        // thread for each; subject focus is the solver's weight map's
+        // job, not the palette's.
         let size = 96;
         let face_x = 24.0f32;
         let face_y = 24.0f32;
@@ -400,45 +310,16 @@ mod tests {
                 && (y as f32) >= face_y
                 && (y as f32) < face_y + face_h;
             if in_face {
-                if ((x + y) & 1) == 0 {
-                    [230, 170, 130]
-                } else {
-                    [170, 90, 60]
-                }
+                [230, 170, 130]
             } else {
                 [20, 20, 240]
             }
         });
-
-        // k=2 on the fixture: face has two hues, sky is one hue — a
-        // total of three distinct vertices. The weighted palette must
-        // pick its two slots from the face; the unweighted palette
-        // will pick the two strongest hull extremes which includes
-        // the saturated blue.
-        let without_face = extract_palette_bytes(&rgba, size, 2, 0, None).unwrap();
-        let with_face = extract_palette_bytes(
-            &rgba,
-            size,
-            2,
-            0,
-            Some(FaceBox {
-                x: face_x,
-                y: face_y,
-                w: face_w,
-                h: face_h,
-            }),
-        )
-        .unwrap();
-
-        let has_blue = |bytes: &[u8]| bytes.chunks_exact(3).any(|c| c[2] > 150 && c[0] < 80);
-        assert!(
-            has_blue(&without_face),
-            "sanity: unweighted palette should include the saturated blue: {without_face:?}"
-        );
-        assert!(
-            !has_blue(&with_face),
-            "face-weighted palette leaked background blue: {with_face:?}"
-        );
+        let out = extract_palette_bytes(&rgba, size, 3, 0, None).unwrap();
+        let has_blue = out.chunks_exact(3).any(|c| c[2] > 150 && c[0] < 80);
+        let has_warm = out.chunks_exact(3).any(|c| c[0] > 150 && c[2] < 150);
+        assert!(has_blue, "palette missing sky hull vertex: {out:?}");
+        assert!(has_warm, "palette missing face hull vertex: {out:?}");
     }
 
     #[test]
@@ -462,15 +343,19 @@ mod tests {
     }
 
     #[test]
-    fn palette_entries_are_saturation_boosted() {
-        // A dim brown image would previously return dim brown threads;
-        // after the boost each slot should have its strongest channel
-        // well above the raw image value.
+    fn palette_preserves_image_luminance() {
+        // A dim image should yield dim threads. We deliberately do not
+        // boost saturation or luminance — a dark shadow must stay dark
+        // so the build's luminance order reflects the image, and so
+        // the user can match each slot to a real thread they can buy.
         let rgba = rgb_image(64, |_, _| [60, 30, 15]);
         let out = extract_palette_bytes(&rgba, 64, 2, 1, None).unwrap();
         for entry in out.chunks_exact(3) {
             let max = *entry.iter().max().unwrap();
-            assert!(max > 180, "slot not boosted, max channel = {max}");
+            assert!(
+                max <= 100,
+                "palette brightened beyond source: max channel = {max}"
+            );
         }
     }
 

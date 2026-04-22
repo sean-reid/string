@@ -368,11 +368,17 @@ impl Solver {
             advanced = true;
         }
         if advanced {
-            // Starting a fresh color: clear the ban window and return
-            // to the anchor pin so the first chord of the new thread
-            // starts from a known tie-off.
+            // Starting a fresh color: clear the ban window so the new
+            // thread can revisit pins the last color banned. Do NOT
+            // reset `current` to pin 0 — that forces every color's
+            // first chord to fan out from 12 o'clock, which produces
+            // a visible starburst at the top of the disc (6 colors =
+            // 6 stacked bursts). The physical builder ties off and
+            // starts the new thread wherever they want; the solver
+            // just continues from the last pin the previous color
+            // ended on, and the scoring loop picks the best next
+            // chord from there.
             self.ban_queue.clear();
-            self.current = 0;
         }
         if let SolverState::Color { active_color, .. } = &self.state {
             *active_color < palette_len
