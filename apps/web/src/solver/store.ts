@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { useImageStore } from "@/image/store";
 import {
   DEFAULT_PHYSICAL,
+  paletteToSrgbBytes,
   type PhysicalParams,
   deriveSolverParams,
 } from "./physics";
@@ -12,10 +13,6 @@ import { getSolverWorker, terminateSolverWorker } from "./worker-client";
 const DEFAULT_FACE_EMPHASIS = 1.5;
 const BATCH_SIZE = 24;
 const STORAGE_KEY = "string.solver.v1";
-
-/** Default single-thread palette. Mono mode = this color only; matches the
- *  cream stroke the canvas has always rendered. PR 4 lets the user override. */
-const DEFAULT_PALETTE_SRGB: readonly number[] = [0xf4, 0xef, 0xe5];
 
 interface SolverState {
   status: SolverStatus;
@@ -122,7 +119,8 @@ const baseStoreFactory = (
         data.data.byteLength,
       );
 
-      const raw = deriveSolverParams(get().physical);
+      const physical = get().physical;
+      const raw = deriveSolverParams(physical);
       const remote = getSolverWorker();
       const face = image.meta.faceBox;
       const extras: SolverInitExtras = {
@@ -131,7 +129,7 @@ const baseStoreFactory = (
         faceW: face?.w ?? 0,
         faceH: face?.h ?? 0,
         faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
-        paletteSrgb: new Uint8Array(DEFAULT_PALETTE_SRGB),
+        paletteSrgb: paletteToSrgbBytes(physical.palette),
       };
       const init = await remote.init(
         rgba,
@@ -142,6 +140,7 @@ const baseStoreFactory = (
       );
       if (get().generationId !== generationId) return;
       set({
+        palette: [...physical.palette],
         pinPositions: init.pinPositions,
         pinCount: init.pinCount,
         lineBudget: init.lineBudget,
