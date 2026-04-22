@@ -5,6 +5,7 @@ import { useViewStore } from "@/solver/view-store";
 import { ExportPanel } from "@/export/export-panel";
 import {
   BOARDS,
+  MAX_PALETTE_SIZE,
   THREADS,
   deriveSolverParams,
   estimatedBuildHours,
@@ -12,6 +13,7 @@ import {
   minSkipPins,
   threadCoverage,
   type BoardId,
+  type PaletteMode,
   type ThreadId,
 } from "@/solver/physics";
 import { Segmented } from "@/components/segmented";
@@ -28,6 +30,11 @@ const THREAD_OPTIONS: Array<{ value: ThreadId; label: string }> = [
   { value: "polyester", label: "Polyester" },
   { value: "dmcFloss", label: "Embroidery" },
   { value: "crochetCotton", label: "Cotton #10" },
+];
+
+const PALETTE_MODE_OPTIONS: Array<{ value: PaletteMode; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "manual", label: "Manual" },
 ];
 
 export function ParameterRail() {
@@ -105,12 +112,14 @@ export function ParameterRail() {
             disabled={running}
           />
           <Segmented
-            label="Thread"
+            label="Thread type"
             value={physical.threadId}
             onChange={(v) => setPhysical({ threadId: v })}
             options={THREAD_OPTIONS}
             disabled={running}
           />
+          <PalettePicker disabled={running} />
+
           <Slider
             label="Nails"
             min={128}
@@ -213,4 +222,166 @@ export function ParameterRail() {
       )}
     </aside>
   );
+}
+
+function PalettePicker({ disabled }: { disabled: boolean }) {
+  const physical = useSolverStore((s) => s.physical);
+  const setPhysical = useSolverStore((s) => s.setPhysical);
+  const storePalette = useSolverStore((s) => s.palette);
+
+  const mode = physical.paletteMode;
+  // In auto mode the slider drives the count and the last extracted palette
+  // populates the swatch strip as a preview. In manual mode the swatches are
+  // editable and the palette length is the count.
+  const previewPalette =
+    mode === "auto" ? storePalette : physical.palette;
+  const count =
+    mode === "auto"
+      ? physical.paletteCount
+      : Math.max(1, Math.min(physical.palette.length, MAX_PALETTE_SIZE));
+
+  const setMode = (next: PaletteMode) => {
+    if (next === mode) return;
+    if (next === "manual") {
+      // Seed manual from whatever palette we last had so the user starts
+      // with a reasonable row instead of an empty one.
+      const seed =
+        storePalette.length >= physical.paletteCount
+          ? storePalette.slice(0, physical.paletteCount)
+          : ensureLength(
+              storePalette.length ? storePalette : [defaultSwatch()],
+              physical.paletteCount,
+            );
+      setPhysical({ paletteMode: "manual", palette: seed });
+    } else {
+      setPhysical({ paletteMode: "auto" });
+    }
+  };
+
+  const setCount = (next: number) => {
+    const clamped = Math.max(1, Math.min(next, MAX_PALETTE_SIZE));
+    if (mode === "auto") {
+      setPhysical({ paletteCount: clamped });
+    } else {
+      const current = physical.palette;
+      const resized = ensureLength(current, clamped);
+      setPhysical({ palette: resized, paletteCount: clamped });
+    }
+  };
+
+  const updateSwatch = (index: number, hex: string) => {
+    if (mode !== "manual") return;
+    const next = physical.palette.slice();
+    next[index] = hex;
+    setPhysical({ palette: next });
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline justify-between">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-muted">
+          Colors
+        </span>
+        <span className="font-mono text-[11px] tabular-nums text-muted">
+          {count} of {MAX_PALETTE_SIZE}
+        </span>
+      </div>
+      <Segmented
+        label="Palette mode"
+        hideLabel
+        value={mode}
+        onChange={setMode}
+        options={PALETTE_MODE_OPTIONS}
+        disabled={disabled}
+      />
+      <Slider
+        label={mode === "auto" ? "Palette size" : "Swatches"}
+        min={1}
+        max={MAX_PALETTE_SIZE}
+        step={1}
+        value={count}
+        onChange={setCount}
+        suffix={`${count}`}
+        disabled={disabled}
+      />
+      <SwatchRow
+        mode={mode}
+        palette={previewPalette}
+        count={count}
+        onSwatchChange={updateSwatch}
+        disabled={disabled}
+      />
+      {mode === "auto" ? (
+        <p className="text-[11px] text-muted">
+          Palette is derived from the image with k-means each time you
+          generate. Hit Generate to refresh the preview.
+        </p>
+      ) : (
+        <p className="text-[11px] text-muted">
+          Pick the exact thread colors you own. Tap a swatch to edit.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SwatchRow({
+  mode,
+  palette,
+  count,
+  onSwatchChange,
+  disabled,
+}: {
+  mode: PaletteMode;
+  palette: readonly string[];
+  count: number;
+  onSwatchChange: (index: number, hex: string) => void;
+  disabled: boolean;
+}) {
+  const entries = ensureLength(palette.length ? palette : [defaultSwatch()], count);
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {entries.map((hex, idx) => {
+        if (mode === "manual") {
+          return (
+            <label
+              key={idx}
+              className="relative h-7 w-7 overflow-hidden rounded-md border border-line"
+              style={{ background: hex }}
+              title={hex}
+            >
+              <input
+                type="color"
+                value={hex}
+                onChange={(e) => onSwatchChange(idx, e.target.value)}
+                disabled={disabled}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                aria-label={`Swatch ${idx + 1}: ${hex}`}
+              />
+            </label>
+          );
+        }
+        return (
+          <span
+            key={idx}
+            aria-label={`Auto swatch ${idx + 1}: ${hex}`}
+            title={hex}
+            className="h-7 w-7 rounded-md border border-line"
+            style={{ background: hex }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function defaultSwatch(): string {
+  return "#f4efe5";
+}
+
+function ensureLength(palette: readonly string[], length: number): string[] {
+  if (palette.length === length) return palette.slice();
+  if (palette.length > length) return palette.slice(0, length);
+  const fill = palette.length > 0 ? palette[palette.length - 1]! : defaultSwatch();
+  return [...palette, ...Array.from({ length: length - palette.length }, () => fill)];
 }
