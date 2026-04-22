@@ -83,9 +83,19 @@ const api: SolverWorkerApi = {
     size: number,
     k: number,
     seed: bigint,
+    face: { x: number; y: number; w: number; h: number } | null,
   ): Promise<Uint8Array> {
     const solver = await getSolver();
-    const bytes = solver.extractPalette(rgba, size, k, seed);
+    const bytes = solver.extractPalette(
+      rgba,
+      size,
+      k,
+      seed,
+      face?.x ?? 0,
+      face?.y ?? 0,
+      face?.w ?? 0,
+      face?.h ?? 0,
+    );
     const copy = new Uint8Array(bytes.length);
     copy.set(bytes);
     return Comlink.transfer(copy, [copy.buffer]);

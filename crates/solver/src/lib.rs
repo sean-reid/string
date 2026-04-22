@@ -7,12 +7,34 @@ pub mod solver;
 use preprocess::Params;
 use solver::{palette::Palette, weight::FaceBox, Solver as GreedySolver, SolverConfig};
 
-/// Wasm-exposed palette extractor. Returns `k * 3` sRGB bytes sorted by
-/// cluster population (most-used color first). See `palette_extract` for
-/// the k-means + downsample details.
+/// Wasm-exposed palette extractor. Returns `k * 3` sRGB bytes, slot 0
+/// first. When `face_w` and `face_h` are both positive, the face box
+/// weights sample importance so palette picks come from the subject
+/// rather than the background (fixes portraits where a big blue sky
+/// would otherwise dominate the palette).
 #[wasm_bindgen(js_name = extractPalette)]
-pub fn extract_palette(rgba: &[u8], size: u32, k: u32, seed: u64) -> Result<Vec<u8>, JsValue> {
-    palette_extract::extract_palette_bytes(rgba, size as usize, k as usize, seed)
+#[allow(clippy::too_many_arguments)]
+pub fn extract_palette(
+    rgba: &[u8],
+    size: u32,
+    k: u32,
+    seed: u64,
+    face_x: f32,
+    face_y: f32,
+    face_w: f32,
+    face_h: f32,
+) -> Result<Vec<u8>, JsValue> {
+    let face = if face_w > 0.0 && face_h > 0.0 {
+        Some(FaceBox {
+            x: face_x,
+            y: face_y,
+            w: face_w,
+            h: face_h,
+        })
+    } else {
+        None
+    };
+    palette_extract::extract_palette_bytes(rgba, size as usize, k as usize, seed, face)
         .map_err(JsValue::from_str)
 }
 

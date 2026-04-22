@@ -47,13 +47,16 @@ export interface SolverWorkerApi {
     extras: SolverInitExtras,
   ): Promise<InitResult>;
   step(max: number): Promise<BatchResult>;
-  /** Run k-means palette extraction in the worker. Returns flat sRGB bytes
-   *  of length `k * 3`, sorted by cluster population (dominant first). */
+  /** Tan-style face-weighted palette extraction in the worker. Returns
+   *  flat sRGB bytes of length `k * 3`, ordered dark → light so the
+   *  builder lays dark threads first. Pass `null` face for uniform
+   *  sampling (no subject bias). */
   extractPalette(
     rgba: Uint8Array,
     size: number,
     k: number,
     seed: bigint,
+    face: { x: number; y: number; w: number; h: number } | null,
   ): Promise<Uint8Array>;
   /** Run the preprocessing pipeline. `grayscale=true` collapses to luminance
    *  (R=G=B); `grayscale=false` preserves chroma per channel. */

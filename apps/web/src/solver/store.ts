@@ -123,11 +123,20 @@ const baseStoreFactory = (
       let palette = [...physical.palette];
       if (physical.paletteMode === "auto") {
         const requested = Math.max(1, Math.min(physical.paletteCount, 6));
+        const facePalette = image.meta.faceBox
+          ? {
+              x: image.meta.faceBox.x,
+              y: image.meta.faceBox.y,
+              w: image.meta.faceBox.w,
+              h: image.meta.faceBox.h,
+            }
+          : null;
         const bytes = await remote.extractPalette(
           new Uint8Array(image.colorRgba),
           image.meta.size,
           requested,
           get().seed,
+          facePalette,
         );
         if (get().generationId !== generationId) return;
         palette = srgbBytesToHex(bytes);

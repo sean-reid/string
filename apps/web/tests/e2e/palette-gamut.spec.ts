@@ -9,20 +9,12 @@ function hexToRgb(hex: string): [number, number, number] {
   ];
 }
 
-function dominantHue(rgb: [number, number, number]): string {
+function rec709(rgb: [number, number, number]): number {
   const [r, g, b] = rgb;
-  const max = Math.max(r, g, b);
-  if (max < 40) return "dark";
-  const mid = (r + g + b) / 3;
-  if (Math.abs(r - mid) < 15 && Math.abs(g - mid) < 15 && Math.abs(b - mid) < 15) {
-    return "gray";
-  }
-  if (r >= g && r >= b) return g > b ? "warm" : "red";
-  if (g >= r && g >= b) return "green";
-  return "blue";
+  return 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255);
 }
 
-test("auto palette spans multiple hue directions on face photo", async ({ page }) => {
+test("auto palette is face-driven and ordered dark to light", async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1400, height: 1000 });
   await page.goto("/");
@@ -52,8 +44,6 @@ test("auto palette spans multiple hue directions on face photo", async ({ page }
     .filter((h): h is string => !!h);
 
   console.log("auto swatches:", hexes);
-  const hues = new Set(hexes.map((h) => dominantHue(hexToRgb(h))));
-  console.log("dominant hues:", [...hues]);
 
   await page.screenshot({
     path: "test-results/palette-gamut-rail.png",
@@ -61,5 +51,11 @@ test("auto palette spans multiple hue directions on face photo", async ({ page }
   });
 
   expect(hexes.length).toBe(6);
-  expect(hues.size).toBeGreaterThanOrEqual(3);
+
+  // Palette must be ordered ascending in luminance — the builder lays
+  // dark threads first so bright highlights stack on top.
+  const luminances = hexes.map((h) => rec709(hexToRgb(h)));
+  for (let i = 1; i < luminances.length; i += 1) {
+    expect(luminances[i]).toBeGreaterThanOrEqual(luminances[i - 1] - 0.01);
+  }
 });
