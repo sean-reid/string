@@ -22,6 +22,10 @@ async function runSample(page: import("@playwright/test").Page, arrowsToLeft: nu
     .first();
   await generate.click();
   await expect(page.getByText(/done, \d/)).toBeVisible({ timeout: 120_000 });
+
+  // Hide the source underlay so the screenshot shows only threads.
+  const showSource = page.getByLabel(/show source/i);
+  if (await showSource.isChecked()) await showSource.uncheck();
 }
 
 test("sample 4 mono", async ({ page }) => {

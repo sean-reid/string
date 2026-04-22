@@ -52,16 +52,23 @@ use self::chord::Endpoints;
 use self::palette::{srgb_to_linear, LinearRgb, Mode, Palette};
 use self::weight::{with_face_emphasis, FaceBox};
 
-/// Linear-RGB color of the bare (dark stained) board the threads sit on.
-/// Canvas is initialized here and every alpha deposit composites on top.
+/// Linear-RGB color of the bare (light cream fabric) board the threads
+/// sit on. Vrellis / kmmeerts convention: bright canvas, dark threads
+/// that subtract light via partial occlusion. Each crossing darkens the
+/// pixel toward the thread color; bare board stays cream where no chord
+/// passes. Threads are all **darker** than the board by design; palette
+/// extraction rejects samples near or above board brightness.
 const BOARD_LINEAR: LinearRgb = [
-    // #0e0d0b (the dark disc in `--color-paper-dark`) converted to linear.
-    // Piecewise sRGB for small values reduces to u/12.92 (exact f32) so
-    // we avoid a non-const powf at module init.
-    0.004024717_f32,
-    0.0036765074_f32,
-    0.0030352874_f32,
+    // #f4efe5 converted to linear sRGB (gamma 2.4 piecewise).
+    0.904_587_8_f32,
+    0.862_741_3_f32,
+    0.784_452_6_f32,
 ];
+
+/// Rec.709 luminance of the board, precomputed for palette eligibility
+/// filters ("is this thread meaningfully darker than the board?") and
+/// luminance residual init.
+const BOARD_LUMINANCE: f32 = 0.2126 * 0.904_587_8 + 0.7152 * 0.862_741_3 + 0.0722 * 0.784_452_6;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SolverConfig {
@@ -185,34 +192,42 @@ impl Solver {
 
         let state = match mode {
             Mode::Mono => {
-                // Scalar luminance residual. The red channel of the
-                // preprocessed buffer carries the pre-computed
-                // luminance (mono preprocess emits R=G=B=luminance).
+                // Scalar "darkness still needed" residual. Mono
+                // preprocess emits R=G=B=luminance; residual is how
+                // much darker this pixel must become from the bare
+                // board to match the target. Clamped at zero for
+                // pixels brighter than or equal to board (those stay
+                // bare). Each thread chord subtracts
+                // `opacity · coverage` from the residual.
                 let mut residual = Vec::with_capacity(pixel_count);
                 for i in 0..pixel_count {
-                    residual.push(preprocessed_rgba[i * 4] as f32 / 255.0);
+                    let target_lum = preprocessed_rgba[i * 4] as f32 / 255.0;
+                    residual.push((BOARD_LUMINANCE - target_lum).max(0.0));
                 }
                 SolverState::Mono { residual }
             }
             Mode::Color => {
-                // Partitive-mixing init. For each pixel we solve a
-                // tiny non-negative least squares problem: decompose
-                // (target − board) as a non-negative combination of
-                // (thread − board) vectors. The coefficients ARE the
-                // per-thread densities the solver must eventually lay
-                // down at that pixel. Density fields behave just like
-                // mono's scalar residual — one per thread — so the
-                // color solver is effectively K parallel mono solves
-                // coupled only at chord-selection time.
+                // Partitive-mixing init, Vrellis paradigm: dark threads
+                // on a light board. For each pixel we solve a tiny
+                // non-negative least squares problem: decompose
+                // (board − target) as a non-negative combination of
+                // (board − thread_i) vectors. Both sides are positive
+                // because target and threads are both at or below
+                // board brightness. Coefficients ARE the per-thread
+                // densities the solver must eventually lay down at
+                // that pixel. Density fields behave just like mono's
+                // scalar residual — one per thread — so the color
+                // solver is effectively K parallel mono solves coupled
+                // only at chord-selection time.
                 let k = palette.len();
                 let thread_basis: Vec<[f32; 3]> = palette
                     .colors()
                     .iter()
                     .map(|c| {
                         [
-                            (c[0] - BOARD_LINEAR[0]).max(0.0),
-                            (c[1] - BOARD_LINEAR[1]).max(0.0),
-                            (c[2] - BOARD_LINEAR[2]).max(0.0),
+                            (BOARD_LINEAR[0] - c[0]).max(0.0),
+                            (BOARD_LINEAR[1] - c[1]).max(0.0),
+                            (BOARD_LINEAR[2] - c[2]).max(0.0),
                         ]
                     })
                     .collect();
@@ -227,6 +242,10 @@ impl Solver {
                     }
                 }
 
+                // thread_basis[i] = board − thread_i (per channel,
+                // non-negative). Its Rec.709 luminance is how much
+                // darkening one unit of thread-i density provides —
+                // precompute once for score weighting and deposit.
                 let thread_luminance: Vec<f32> = thread_basis
                     .iter()
                     .map(|c| REC709_R * c[0] + REC709_G * c[1] + REC709_B * c[2])
@@ -245,10 +264,15 @@ impl Solver {
                     let tr = srgb_to_linear(bgra[0] as f32 / 255.0);
                     let tg = srgb_to_linear(bgra[1] as f32 / 255.0);
                     let tb = srgb_to_linear(bgra[2] as f32 / 255.0);
+                    // Offset is board − target, so positive for targets
+                    // darker than board (the vast majority of pixels
+                    // in natural images against a cream board).
+                    // Pixels brighter than board clamp to zero — those
+                    // stay bare cream, no thread needed.
                     let b = [
-                        (tr - BOARD_LINEAR[0]).max(0.0),
-                        (tg - BOARD_LINEAR[1]).max(0.0),
-                        (tb - BOARD_LINEAR[2]).max(0.0),
+                        (BOARD_LINEAR[0] - tr).max(0.0),
+                        (BOARD_LINEAR[1] - tg).max(0.0),
+                        (BOARD_LINEAR[2] - tb).max(0.0),
                     ];
                     for (i, basis) in thread_basis.iter().enumerate() {
                         atb[i] = basis[0] * b[0] + basis[1] * b[1] + basis[2] * b[2];

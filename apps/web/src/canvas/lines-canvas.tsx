@@ -3,7 +3,7 @@ import { useSolverStore } from "@/solver/store";
 import { BOARDS, THREADS, threadCoverage } from "@/solver/physics";
 
 const DISPLAY_CAP = 1024;
-const FALLBACK_COLOR = "#f4efe5";
+const FALLBACK_COLOR = "#111111";
 const LINE_WIDTH = 0.9;
 // Each stroke() call composites as one shape, so overlaps within a batch
 // don't stack. Multiple batches composite over each other, giving the

@@ -1,45 +1,42 @@
-//! Palette extraction for a photo, tuned for **additive reconstruction**
-//! on a dark board.
+//! Palette extraction for a photo, tuned for **subtractive
+//! reconstruction** on a light board (Vrellis paradigm).
 //!
-//! Threads only ADD light. A dark thread sits invisible against the
-//! bare board, contributing zero contrast per line drawn — including
-//! one in the palette wastes a slot the solver can't usefully spend.
-//! Dark regions of the image are rendered by the *absence* of thread
-//! (the bare dark board showing through gaps), not by dark thread.
-//! Midtones come from the same bright threads drawn at lower density
-//! so the dark board still peeks through. Every palette entry should
-//! therefore be a **bright, saturated** thread that differs from its
-//! neighbors by **hue**, not by luminance.
+//! Threads only SUBTRACT light. A thread as bright as the board sits
+//! invisible against it, contributing zero contrast per crossing —
+//! including one in the palette wastes a slot the solver can't
+//! usefully spend. Bright regions of the image are rendered by the
+//! *absence* of thread (bare cream board showing through gaps), not
+//! by light thread. Midtones come from dark threads drawn at lower
+//! density so the board still peeks through between crossings.
+//! Every palette entry should therefore be a **dark, saturated**
+//! thread that differs from its neighbors by **hue**, not by how
+//! much lighter it is.
 //!
 //! Algorithm — Tan et al. 2016 in spirit, approximated cheaply:
 //!
 //! 1. Downsample image to `SAMPLE_DIM × SAMPLE_DIM` in linear RGB.
-//! 2. Reject samples that are **achromatic** (chroma below a floor) or
-//!    **too dark** (Rec.709 luminance near the board). What's left is
-//!    the eligible pool of hue candidates.
-//! 3. FPS (Gonzalez 1985) in linear RGB. Slot 0 = highest-chroma
-//!    sample; each subsequent slot = sample with the maximum minimum
-//!    distance to the already-picked set. FPS provably picks hull
-//!    vertices, which is what a full convex-hull simplification
-//!    converges to; filtering achromatic samples first forces those
-//!    vertices to differ in hue rather than luminance.
-//! 4. **Saturation boost**: scale each slot so its strongest channel
-//!    hits ~0.95. A dim warm sample `[0.3, 0.15, 0.05]` becomes a
-//!    vivid orange `[0.95, 0.475, 0.158]` — a thread the user can
-//!    actually buy and see on the board.
+//! 2. Reject samples too close to board brightness (they add no
+//!    contrast) and samples with negligible chroma that don't fall
+//!    well below board (gray near-board noise). What's left is the
+//!    eligible pool of hue candidates, all darker than board.
+//! 3. FPS (Gonzalez 1985) in linear RGB. Slot 0 = sample with
+//!    maximum contrast against board; each subsequent slot = sample
+//!    with maximum minimum distance to the already-picked set. FPS
+//!    provably picks hull vertices of the image's darker-than-board
+//!    color cone, which is what a full convex-hull simplification
+//!    converges to.
 //!
-//! If the image has no chromatic content at all (a genuinely
-//! grayscale photo), the pool is empty and we fall back to cream for
-//! every slot — same as mono mode. This keeps grayscale images
-//! visually consistent with palette-of-one.
+//! If the image is entirely brighter than board (everything bare),
+//! or has no dark chromatic content, the pool is empty and we fall
+//! back to black for every slot — mono-on-cream at its rawest.
 //!
-//! k=1 is an aesthetic exception: palette-of-one returns the
-//! traditional `#f4efe5` cream verbatim regardless of image content.
+//! k=1 is the aesthetic exception: palette-of-one returns pure black
+//! `#111111`, the single-thread Vrellis-style monochrome baseline.
 //!
-//! The palette is returned ordered ascending in Rec.709 luminance so
-//! lower-luminance hues (e.g. saturated blue) lay down first and
-//! higher-luminance hues (yellow, near-white) stack on top — standard
-//! practice on a dark board.
+//! The palette is returned ordered ascending in Rec.709 luminance
+//! (darkest first). Darkest threads lay down first so they establish
+//! the deepest shadows; lighter-dark threads stack on top for
+//! midtone hue.
 
 use crate::solver::palette::srgb_to_linear;
 use crate::solver::weight::FaceBox;
@@ -47,27 +44,20 @@ use crate::solver::weight::FaceBox;
 const SAMPLE_DIM: usize = 128;
 const MAX_K: usize = 8;
 
-/// sRGB of the classic cream thread. Mono mode (k=1) returns this
-/// verbatim — matches the warm off-white cotton a hand-built piece
-/// tends to use.
-const CREAM_SRGB: [u8; 3] = [0xF4, 0xEF, 0xE5];
+/// sRGB of the default black thread. Mono mode (k=1) returns this
+/// verbatim — single dark thread on cream board is the canonical
+/// Vrellis-style portrait baseline.
+const BLACK_SRGB: [u8; 3] = [0x11, 0x11, 0x11];
 
-/// Minimum max-channel brightness (linear RGB) for a sample to be
-/// eligible. Rec.709 luminance would unfairly filter saturated blue —
-/// a pure `[0, 0, 0.7]` thread has luminance ~0.05 but is obviously
-/// visible against the dark board. Max-channel captures "brightest
-/// single channel", which is what matters for contrast on a near-black
-/// backdrop.
-const MIN_MAX_CHANNEL: f32 = 0.12;
-/// Minimum chroma (max_channel − min_channel in linear RGB) for a
-/// sample to qualify as a palette vertex. Below this the sample is
-/// essentially gray; it has no hue to preserve after the saturation
-/// boost and would just duplicate an existing slot.
-const MIN_CHROMA: f32 = 0.04;
-/// Saturation-boost target: scale each palette entry so its strongest
-/// channel hits this value in linear RGB. 0.95 gives a vivid but
-/// not-quite-clipped thread color that maps to real yarn/floss.
-const BOOST_TARGET: f32 = 0.95;
+/// Rec.709 luminance of the board, precomputed so palette extraction
+/// shares the solver's "what counts as usefully dark?" threshold.
+/// Mirrors `solver::mod::BOARD_LUMINANCE` by convention.
+const BOARD_LUMINANCE: f32 = 0.212_6 * 0.904_587_8 + 0.715_2 * 0.862_741_3 + 0.072_2 * 0.784_452_6;
+
+/// Minimum Rec.709 luminance gap between a sample and the board for
+/// it to qualify as a palette vertex. Below this the thread is too
+/// close to board brightness to add visible contrast per crossing.
+const MIN_BOARD_CONTRAST: f32 = 0.15;
 
 /// Public entry point. `face` is accepted for future face-aware
 /// variants but is currently unused — palette extraction spans the
@@ -87,45 +77,28 @@ pub fn extract_palette_bytes(
         return Err("palette size must be in 1..=8");
     }
     if k == 1 {
-        return Ok(CREAM_SRGB.to_vec());
+        return Ok(BLACK_SRGB.to_vec());
     }
     let _ = face;
 
     let samples = downsample_linear_rgb(rgba, size);
     if samples.is_empty() {
-        return Ok(CREAM_SRGB.repeat(k));
+        return Ok(BLACK_SRGB.repeat(k));
     }
 
-    let pool = chromatic_above_board(&samples);
+    let pool = darker_than_board(&samples);
     if pool.is_empty() {
-        // No usable chromatic content — the image is effectively
-        // grayscale. Mono-mode cream for every slot keeps a grayscale
-        // photo looking like a grayscale photo.
-        return Ok(CREAM_SRGB.repeat(k));
+        // Everything in the image is at or above board brightness —
+        // no usable darker-than-board content. Fall back to black for
+        // every slot so a mostly-white source still produces visible
+        // detail where there's any darker-than-board content at all.
+        return Ok(BLACK_SRGB.repeat(k));
     }
 
     let picks = farthest_point_sampling(&pool, k);
-    let boosted: Vec<[f32; 3]> = picks.into_iter().map(boost_entry).collect();
-    let ordered = order_for_build(boosted);
+    let ordered = order_for_build(picks);
     let _ = seed;
     Ok(linear_to_srgb_bytes(&ordered))
-}
-
-/// Push each palette entry's strongest channel up to `BOOST_TARGET`
-/// while preserving its hue direction. The key invariant: every
-/// returned thread has meaningful contrast against the dark board,
-/// so no palette slot is wasted on an invisible color.
-fn boost_entry(c: [f32; 3]) -> [f32; 3] {
-    let max = c[0].max(c[1]).max(c[2]);
-    if max <= 1e-4 {
-        return c;
-    }
-    let scale = BOOST_TARGET / max;
-    [
-        (c[0] * scale).min(BOOST_TARGET),
-        (c[1] * scale).min(BOOST_TARGET),
-        (c[2] * scale).min(BOOST_TARGET),
-    ]
 }
 
 /// Orders a palette for a physical build: ascending Rec.709 luminance.
@@ -174,32 +147,29 @@ fn downsample_linear_rgb(rgba: &[u8], size: usize) -> Vec<[f32; 3]> {
     out
 }
 
-/// Samples eligible to anchor a palette slot: bright enough on their
-/// dominant channel to show on the dark board AND chromatic enough that
-/// the boost preserves a distinct hue. Near-black and near-gray samples
-/// are rejected.
-fn chromatic_above_board(samples: &[[f32; 3]]) -> Vec<[f32; 3]> {
+/// Samples eligible to anchor a palette slot: meaningfully darker
+/// than the board (so each crossing adds visible contrast). Near-
+/// board-brightness samples are rejected because a thread at board
+/// luminance is invisible on the canvas — including it wastes a
+/// palette slot.
+fn darker_than_board(samples: &[[f32; 3]]) -> Vec<[f32; 3]> {
     samples
         .iter()
         .copied()
         .filter(|c| {
-            let max = c[0].max(c[1]).max(c[2]);
-            if max < MIN_MAX_CHANNEL {
-                return false;
-            }
-            let min = c[0].min(c[1]).min(c[2]);
-            (max - min) >= MIN_CHROMA
+            let lum = rec709(*c);
+            BOARD_LUMINANCE - lum >= MIN_BOARD_CONTRAST
         })
         .collect()
 }
 
 /// Farthest-point sampling in linear RGB. Slot 0 is the sample with
-/// the highest chroma (widest max−min spread); each subsequent slot
-/// is the sample with maximum minimum-distance to the already-picked
-/// set. Seeding with chroma rather than luminance matters because the
-/// pool is already above-board-and-chromatic — we want the palette's
-/// first "anchor" to be the most vivid hue in the image, not just
-/// the brightest.
+/// maximum contrast against board (darkest); each subsequent slot is
+/// the sample with the maximum minimum-distance to the already-picked
+/// set. Seeding with the darkest sample matters because the pool is
+/// already filtered to darker-than-board — we want the palette's
+/// first anchor to be the deepest shadow available so hull vertices
+/// fan out from there.
 fn farthest_point_sampling(pool: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
     if pool.is_empty() {
         return Vec::new();
@@ -208,11 +178,11 @@ fn farthest_point_sampling(pool: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
     let mut min_dist: Vec<f32> = vec![f32::INFINITY; pool.len()];
 
     let mut slot0 = 0usize;
-    let mut best_chroma = f32::NEG_INFINITY;
+    let mut darkest = f32::INFINITY;
     for (i, c) in pool.iter().enumerate() {
-        let chroma = c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
-        if chroma > best_chroma {
-            best_chroma = chroma;
+        let lum = rec709(*c);
+        if lum < darkest {
+            darkest = lum;
             slot0 = i;
         }
     }
@@ -302,25 +272,25 @@ mod tests {
     fn k_of_one_always_returns_cream() {
         let warm = rgb_image(64, |_, _| [200, 50, 80]);
         let out = extract_palette_bytes(&warm, 64, 1, 0, None).unwrap();
-        assert_eq!(out, CREAM_SRGB.to_vec());
+        assert_eq!(out, BLACK_SRGB.to_vec());
         let cool = rgb_image(64, |_, _| [10, 40, 200]);
         let out = extract_palette_bytes(&cool, 64, 1, 7, None).unwrap();
-        assert_eq!(out, CREAM_SRGB.to_vec());
+        assert_eq!(out, BLACK_SRGB.to_vec());
     }
 
     #[test]
     fn three_panels_with_k_three_picks_all_primaries() {
-        // Tan-style FPS on an R/G/B panel image picks one vertex per
-        // primary; after saturation boost each palette entry is a
-        // near-saturated primary.
+        // On an R/G/B panel image all three primaries are darker than
+        // the cream board, so FPS should pick one of each. No boost —
+        // picks are returned as the raw image-derived hues.
         let size = 96;
         let rgba = rgb_image(size, |x, _| {
             if x < size / 3 {
-                [220, 20, 20]
+                [180, 20, 20]
             } else if x < 2 * size / 3 {
-                [20, 200, 20]
+                [20, 160, 20]
             } else {
-                [20, 20, 220]
+                [20, 20, 180]
             }
         });
         let out = extract_palette_bytes(&rgba, size, 3, 13, None).unwrap();
@@ -330,13 +300,13 @@ mod tests {
         let mut has_green = false;
         let mut has_blue = false;
         for c in &colors {
-            if c[0] > 150 && c[1] < 100 && c[2] < 100 {
+            if c[0] > 100 && c[1] < 60 && c[2] < 60 {
                 has_red = true;
             }
-            if c[1] > 150 && c[0] < 100 && c[2] < 100 {
+            if c[1] > 100 && c[0] < 60 && c[2] < 60 {
                 has_green = true;
             }
-            if c[2] > 150 && c[0] < 100 && c[1] < 100 {
+            if c[2] > 100 && c[0] < 60 && c[1] < 60 {
                 has_blue = true;
             }
         }
@@ -347,62 +317,35 @@ mod tests {
     }
 
     #[test]
-    fn palette_spans_gamut_including_background_extremes() {
-        // A portrait with warm face + saturated sky. The palette must
-        // include both extremes as hull vertices so the solver has a
-        // thread for each; subject focus is the solver's weight map's
-        // job, not the palette's.
-        let size = 96;
-        let face_x = 24.0f32;
-        let face_y = 24.0f32;
-        let face_w = 48.0f32;
-        let face_h = 48.0f32;
-        let rgba = rgb_image(size, |x, y| {
-            let in_face = (x as f32) >= face_x
-                && (x as f32) < face_x + face_w
-                && (y as f32) >= face_y
-                && (y as f32) < face_y + face_h;
-            if in_face {
-                [230, 170, 130]
-            } else {
-                [20, 20, 240]
-            }
-        });
-        let out = extract_palette_bytes(&rgba, size, 3, 0, None).unwrap();
-        let has_blue = out.chunks_exact(3).any(|c| c[2] > 150 && c[0] < 80);
-        let has_warm = out.chunks_exact(3).any(|c| c[0] > 150 && c[2] < 150);
-        assert!(has_blue, "palette missing sky hull vertex: {out:?}");
-        assert!(has_warm, "palette missing face hull vertex: {out:?}");
-    }
-
-    #[test]
-    fn every_palette_entry_is_bright_enough_to_see_on_dark_board() {
-        // Dark threads are invisible against the dark board, so no
-        // palette slot may sit near the board luminance. Even a dim
-        // source image must be boosted to a visible hue — the user
-        // renders dark regions by sparse coverage, not dark thread.
+    fn every_palette_entry_is_dark_enough_to_see_on_cream_board() {
+        // Palette threads must be meaningfully darker than the cream
+        // board so each crossing adds visible contrast. A mid-bright
+        // source can still produce palette entries — the filter keeps
+        // only samples whose luminance gap from board exceeds the
+        // contrast threshold.
         let rgba = rgb_image(64, |_, _| [60, 30, 15]);
         let out = extract_palette_bytes(&rgba, 64, 3, 1, None).unwrap();
         for entry in out.chunks_exact(3) {
-            let max = *entry.iter().max().unwrap();
+            let rn = entry[0] as f32 / 255.0;
+            let gn = entry[1] as f32 / 255.0;
+            let bn = entry[2] as f32 / 255.0;
+            let lum = 0.2126 * rn + 0.7152 * gn + 0.0722 * bn;
             assert!(
-                max > 200,
-                "palette entry not boost-saturated enough to see: {entry:?}"
+                lum < 0.8,
+                "palette entry too close to board brightness: {entry:?} (lum={lum})"
             );
         }
     }
 
     #[test]
-    fn grayscale_image_falls_back_to_cream_on_multi_slot() {
-        // A truly achromatic photo has no hues to pick. The palette
-        // falls back to cream for every slot so the image still solves
-        // (approximating grayscale via cream-on-dark-board density).
-        let rgba = rgb_image(64, |x, _| {
-            let g = (x * 255 / 64) as u8;
-            [g, g, g]
-        });
+    fn nearly_white_image_falls_back_to_black_on_multi_slot() {
+        // If the image is essentially the board color (no
+        // darker-than-board content), the palette falls back to black
+        // for every slot so the solver at least has one usable dark
+        // thread to place anywhere the image deviates from board.
+        let rgba = rgb_image(64, |_, _| [245, 240, 230]);
         let out = extract_palette_bytes(&rgba, 64, 3, 0, None).unwrap();
-        assert_eq!(out, CREAM_SRGB.repeat(3));
+        assert_eq!(out, BLACK_SRGB.repeat(3));
     }
 
     #[test]

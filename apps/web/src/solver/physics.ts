@@ -19,7 +19,7 @@ export interface BoardSpec {
   diameterMm: number;
 }
 
-export const DEFAULT_THREAD_COLOR = "#f4efe5";
+export const DEFAULT_THREAD_COLOR = "#111111";
 
 export const THREADS: Record<ThreadId, ThreadSpec> = {
   polyester: {
@@ -83,7 +83,10 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   boardId: "b16",
   threadId: "polyester",
   pinCount: 288,
-  lineBudget: 1500,
+  // Vrellis-style dark-on-cream uses a thin, low-opacity thread that
+  // needs many crossings to build local darkness. The reference
+  // algorithm uses ~4000 chords on a 300-pin board; we mirror that.
+  lineBudget: 4000,
   minChordPct: 0.2,
   paletteMode: "auto",
   paletteCount: 1,
@@ -96,13 +99,29 @@ export function pixelMm(board: BoardSpec): number {
 }
 
 /**
- * Single-pass thread coverage of one solver-internal pixel. Clamped to a
- * sensible range so tiny pixels or tiny threads still converge.
+ * Effective per-crossing opacity of one thread pass through one solver-
+ * internal pixel. Geometric coverage (thread diameter / pixel size) is
+ * an upper bound — a real thread isn't fully opaque at a single
+ * crossing, and for the Vrellis-style dense cobweb we need many
+ * crossings to build local darkness rather than one or two high-alpha
+ * passes. The attenuation factor brings effective per-crossing opacity
+ * into the 0.03–0.05 range the reference algorithms use; 4000 chords
+ * at this opacity give the characteristic density without
+ * oversaturating.
  */
 export function threadCoverage(thread: ThreadSpec, board: BoardSpec): number {
   const raw = thread.diameterMm / pixelMm(board);
-  return Math.min(Math.max(raw, 0.05), 0.5);
+  const geometric = Math.min(Math.max(raw, 0.05), 0.5);
+  return geometric * THREAD_OPACITY_ATTENUATION;
 }
+
+/**
+ * Scales geometric thread coverage down to a physically realistic
+ * per-crossing opacity. 0.15 maps our 0.34 geometric coverage to ~0.05
+ * effective opacity — matches the halfmonty / kmmeerts Vrellis-style
+ * reference (LINE_WEIGHT = 8/255 ≈ 0.031 per crossing).
+ */
+const THREAD_OPACITY_ATTENUATION = 0.15;
 
 /**
  * Minimum pin-index skip to guarantee the chord is at least `pct` of the

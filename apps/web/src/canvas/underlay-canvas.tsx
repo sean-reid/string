@@ -43,7 +43,9 @@ export function UnderlayCanvas() {
     ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
     ctx.clip();
 
-    ctx.fillStyle = "#0E0D0B";
+    // Board color — cream fabric. Vrellis paradigm: bright canvas,
+    // dark threads that subtract light via occlusion.
+    ctx.fillStyle = "#F4EFE5";
     ctx.fillRect(0, 0, size, size);
 
     if (bitmap && showSource) {
