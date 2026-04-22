@@ -4,6 +4,7 @@ import { useSolverStore } from "@/solver/store";
 import { ExportPanel } from "@/export/export-panel";
 import {
   BOARDS,
+  DEFAULT_THREAD_COLOR,
   MAX_PALETTE_SIZE,
   THREADS,
   deriveSolverParams,
@@ -39,15 +40,23 @@ export function ParameterRail() {
   // ("done"). `lastSolvedHash` tracks the hash we last kicked off a
   // solve for, so we don't loop after the solve transitions through
   // "running" → "done" while the hash stays the same.
+  //
+  // Also resets `physical.palette` back to the default single-black
+  // swatch when a new image loads. The previous image's palette
+  // choices aren't meaningful for the new photo; start fresh, let
+  // auto-pick or "+" seed from the new image's suggestions.
   const lastSolvedHash = useRef<string | null>(null);
   useEffect(() => {
     if (imageStatus !== "ready") return;
     if (!imageHash) return;
     if (solverStatus === "running") return;
     if (lastSolvedHash.current === imageHash) return;
+    if (lastSolvedHash.current !== null) {
+      setPhysical({ palette: [DEFAULT_THREAD_COLOR] });
+    }
     lastSolvedHash.current = imageHash;
     void start();
-  }, [imageStatus, imageHash, solverStatus, start]);
+  }, [imageStatus, imageHash, solverStatus, start, setPhysical]);
 
   useEffect(() => {
     if (solverStatus !== "running") return;

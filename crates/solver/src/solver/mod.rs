@@ -632,32 +632,55 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
     });
 }
 
-/// Solve a tiny non-negative least squares problem with the
-/// multiplicative update rule (Lee & Seung 2000). Finds
-/// `w ≥ 0` minimizing `‖A w − b‖²` where `AtA` is the precomputed
-/// `A^T A` (kxk row-major) and `atb` is `A^T b`. In our setting `A`
-/// is the `3 × k` palette-basis matrix (`thread - board` per column)
-/// and `b` is `target - board` at the pixel. 20 iterations are plenty
-/// for k ≤ 8 and the small dynamic range we operate in. Writes into
-/// `w` in place; caller seeds the initial guess (we use a small
-/// positive constant).
+/// Single-best-thread decomposition: assign each pixel's darkening
+/// demand entirely to the palette thread whose basis best aligns
+/// with the target-minus-board vector `b`. Other threads get zero.
+///
+/// This is simpler and visibly more effective than full NNLS. The
+/// problem with NNLS here is that the thread basis vectors
+/// (board − thread_i) for dark threads are all roughly
+/// `[0.8, 0.8, 0.7]` — they point in nearly the same direction. The
+/// least-squares optimum distributes weight almost evenly across
+/// threads, making the per-thread density fields indistinguishable
+/// and erasing any hue signal from chord scoring.
+///
+/// Hard-assignment to a single thread per pixel is the right partitive-
+/// mixing model anyway: each physical crossing is one thread's color,
+/// not a blend of several at the pixel. Color diversity emerges at
+/// the neighborhood scale as neighboring pixels, owned by different
+/// threads, render together in the viewer's eye.
 fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
-    // Seed strictly positive so the multiplicative update has
-    // something to scale. Near-zero is fine — the update converges
-    // to the NNLS optimum regardless of seed.
     for wi in w.iter_mut().take(k) {
-        *wi = 1e-3;
+        *wi = 0.0;
     }
-    for _ in 0..20 {
-        for i in 0..k {
-            let num = atb[i].max(0.0);
-            let mut den = 0.0f32;
-            for j in 0..k {
-                den += ata[i * k + j] * w[j];
-            }
-            w[i] *= (num + 1e-9) / (den + 1e-9);
+    if k == 0 {
+        return;
+    }
+    // Best thread i = argmax of `(b · basis_i) / |basis_i|` — the
+    // normalized projection of b onto each thread's darkening
+    // direction. `atb[i] = b · basis_i`; `ata[i*k + i] = |basis_i|²`.
+    // So `atb[i] / sqrt(ata[i*k + i])` gives the cosine-scaled length.
+    let mut best_i = 0usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for i in 0..k {
+        let norm_sq = ata[i * k + i];
+        if norm_sq <= 1e-8 {
+            continue;
+        }
+        let aligned = atb[i] / norm_sq.sqrt();
+        if aligned > best_score {
+            best_score = aligned;
+            best_i = i;
         }
     }
+    if best_score <= 0.0 {
+        return;
+    }
+    // Magnitude: the component of b along basis_best. That's
+    // `(b · basis_best) / |basis_best|² = atb[best] / ata[best²]`,
+    // clamped non-negative.
+    let density = (atb[best_i] / ata[best_i * k + best_i]).max(0.0);
+    w[best_i] = density;
 }
 
 /// Alpha-composite a thread onto the canvas along a chord. Each touched
