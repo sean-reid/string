@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./_fixtures";
 
 async function primePattern(page: Page) {
   await page.goto("/");

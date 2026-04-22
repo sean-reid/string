@@ -131,6 +131,16 @@ const baseStoreFactory = (
       if (get().generationId !== generationId) return;
 
       const raw = deriveSolverParams(physical);
+      // e2e override: `?lines=N` shrinks the solve so tests finish in
+      // seconds. No UI exposure; clamped to [10, physical.lineBudget] so
+      // it can never exceed the user's chosen budget.
+      if (typeof window !== "undefined") {
+        const q = new URLSearchParams(window.location.search).get("lines");
+        const n = q ? Number.parseInt(q, 10) : NaN;
+        if (Number.isFinite(n) && n >= 10) {
+          raw.line_budget = Math.min(n, physical.lineBudget);
+        }
+      }
       const face = image.meta.faceBox;
       const extras: SolverInitExtras = {
         faceX: face?.x ?? 0,
