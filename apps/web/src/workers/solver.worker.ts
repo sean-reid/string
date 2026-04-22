@@ -48,7 +48,7 @@ const api: SolverWorkerApi = {
     wasmParams.face_h = extras.faceH;
     wasmParams.face_emphasis = extras.faceEmphasis;
 
-    instance = new solver.Solver(rgba, size, wasmParams, seed);
+    instance = new solver.Solver(rgba, size, wasmParams, extras.paletteSrgb, seed);
 
     const pinPositions = instance.pinPositions();
     const copy = new Float32Array(pinPositions.length);
@@ -58,19 +58,23 @@ const api: SolverWorkerApi = {
       pinCount: instance.pinCount(),
       pinPositions: Comlink.transfer(copy, [copy.buffer]),
       lineBudget: instance.lineBudget(),
+      paletteSize: instance.paletteSize(),
     };
   },
 
   async step(max: number): Promise<BatchResult> {
     const solver = assertInstance();
-    const raw = solver.stepMany(max);
-    const copy = new Uint16Array(raw.length);
-    copy.set(raw);
-    const done = solver.isDone() || copy.length === 0;
+    const rawPins = solver.stepMany(max);
+    const pins = new Uint16Array(rawPins.length);
+    pins.set(rawPins);
+    const rawColors = solver.lastBatchColors();
+    const colors = new Uint8Array(rawColors.length);
+    colors.set(rawColors);
+    const done = solver.isDone() || pins.length === 0;
     const linesDrawn = solver.linesDrawn();
     return Comlink.transfer(
-      { batch: copy, linesDrawn, done },
-      [copy.buffer],
+      { batch: pins, colors, linesDrawn, done },
+      [pins.buffer, colors.buffer],
     );
   },
 

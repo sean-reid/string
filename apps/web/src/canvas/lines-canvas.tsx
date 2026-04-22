@@ -3,7 +3,7 @@ import { useSolverStore } from "@/solver/store";
 import { BOARDS, THREADS, threadCoverage } from "@/solver/physics";
 
 const DISPLAY_CAP = 1024;
-const THREAD_COLOR = "#f4efe5";
+const FALLBACK_COLOR = "#f4efe5";
 const LINE_WIDTH = 0.9;
 // Each stroke() call composites as one shape, so overlaps within a batch
 // don't stack. Multiple batches composite over each other, giving the
@@ -18,6 +18,8 @@ const STROKE_BATCH = 16;
  */
 export function LinesCanvas() {
   const sequence = useSolverStore((s) => s.sequence);
+  const sequenceColors = useSolverStore((s) => s.sequenceColors);
+  const palette = useSolverStore((s) => s.palette);
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const generationId = useSolverStore((s) => s.generationId);
@@ -73,13 +75,24 @@ export function LinesCanvas() {
 
     ctx.save();
     ctx.scale(dpr, dpr);
-    ctx.strokeStyle = THREAD_COLOR;
     ctx.globalAlpha = lineOpacity;
     ctx.lineWidth = LINE_WIDTH;
     ctx.lineCap = "round";
 
+    // Group consecutive same-color lines into a single stroke() call so the
+    // alpha stacking matches the live-generate path. Color changes flush the
+    // batch and switch strokeStyle. In mono mode the whole sequence is one
+    // color run, identical to the pre-palette renderer.
     let batchSize = 0;
+    let activeColor: number | null = null;
     ctx.beginPath();
+    const flush = () => {
+      if (batchSize > 0) {
+        ctx.stroke();
+        ctx.beginPath();
+        batchSize = 0;
+      }
+    };
     for (let i = start; i < sequence.length; i++) {
       const fromIdx = sequence[i - 1];
       const toIdx = sequence[i];
@@ -96,20 +109,32 @@ export function LinesCanvas() {
       ) {
         continue;
       }
+      const color = sequenceColors[i] ?? 0;
+      if (color !== activeColor) {
+        flush();
+        ctx.strokeStyle = palette[color] ?? FALLBACK_COLOR;
+        activeColor = color;
+      }
       ctx.moveTo(fx * scale, fy * scale);
       ctx.lineTo(tx * scale, ty * scale);
       batchSize++;
       if (batchSize >= STROKE_BATCH) {
-        ctx.stroke();
-        ctx.beginPath();
-        batchSize = 0;
+        flush();
       }
     }
-    if (batchSize > 0) ctx.stroke();
+    flush();
     ctx.restore();
 
     drawnCountRef.current = sequence.length;
-  }, [sequence, pinPositions, imageSize, generationId, lineOpacity]);
+  }, [
+    sequence,
+    sequenceColors,
+    palette,
+    pinPositions,
+    imageSize,
+    generationId,
+    lineOpacity,
+  ]);
 
   return (
     <canvas

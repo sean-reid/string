@@ -13,12 +13,21 @@ const DEFAULT_FACE_EMPHASIS = 1.5;
 const BATCH_SIZE = 24;
 const STORAGE_KEY = "string.solver.v1";
 
+/** Default single-thread palette. Mono mode = this color only; matches the
+ *  cream stroke the canvas has always rendered. PR 4 lets the user override. */
+const DEFAULT_PALETTE_SRGB: readonly number[] = [0xf4, 0xef, 0xe5];
+
 interface SolverState {
   status: SolverStatus;
   errorMessage: string | null;
   physical: PhysicalParams;
   seed: bigint;
   sequence: number[];
+  /** Palette index per line in `sequence`. Length tracks `sequence.length`;
+   *  entry 0 pairs with the anchor pin (always 0). */
+  sequenceColors: number[];
+  /** sRGB hex strings, one per palette index; PR 2 is always length 1. */
+  palette: string[];
   pinPositions: Float32Array | null;
   pinCount: number;
   imageSize: number;
@@ -42,6 +51,7 @@ async function runSolverLoop(get: () => SolverState, generationId: number) {
     if (result.batch.length > 0) {
       useSolverStore.setState((prev) => ({
         sequence: prev.sequence.concat(Array.from(result.batch)),
+        sequenceColors: prev.sequenceColors.concat(Array.from(result.colors)),
         linesDrawn: result.linesDrawn,
       }));
     }
@@ -62,6 +72,8 @@ const baseStoreFactory = (
   physical: { ...DEFAULT_PHYSICAL },
   seed: 0x53_74_72_69_6e_67_01n,
   sequence: [],
+  sequenceColors: [],
+  palette: ["#f4efe5"],
   pinPositions: null,
   pinCount: 0,
   imageSize: 0,
@@ -91,6 +103,7 @@ const baseStoreFactory = (
       status: "running",
       errorMessage: null,
       sequence: [0],
+      sequenceColors: [0],
       linesDrawn: 0,
       pinPositions: null,
       pinCount: 0,
@@ -118,6 +131,7 @@ const baseStoreFactory = (
         faceW: face?.w ?? 0,
         faceH: face?.h ?? 0,
         faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
+        paletteSrgb: new Uint8Array(DEFAULT_PALETTE_SRGB),
       };
       const init = await remote.init(
         rgba,
@@ -155,6 +169,7 @@ const baseStoreFactory = (
       status: "idle",
       errorMessage: null,
       sequence: [],
+      sequenceColors: [],
       pinPositions: null,
       pinCount: 0,
       imageSize: 0,
@@ -192,12 +207,27 @@ export const useSolverStore = create<SolverState>()(
       physical: state.physical,
       seed: state.seed,
       sequence: state.sequence,
+      sequenceColors: state.sequenceColors,
+      palette: state.palette,
       pinPositions: state.pinPositions,
       pinCount: state.pinCount,
       imageSize: state.imageSize,
       linesDrawn: state.linesDrawn,
       lineBudget: state.lineBudget,
     }),
-    version: 1,
+    version: 2,
+    migrate: (persisted, version) => {
+      const state = persisted as Partial<SolverState> | undefined;
+      if (!state) return state as unknown as SolverState;
+      if (version < 2) {
+        const seq = state.sequence ?? [];
+        return {
+          ...state,
+          sequenceColors: new Array(seq.length).fill(0),
+          palette: ["#f4efe5"],
+        } as SolverState;
+      }
+      return state as SolverState;
+    },
   }),
 );

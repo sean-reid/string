@@ -15,11 +15,15 @@ export interface InitResult {
   pinCount: number;
   pinPositions: Float32Array;
   lineBudget: number;
+  paletteSize: number;
 }
 
 export interface BatchResult {
   /** Pin indices reached since the last batch. Empty when the solver finishes. */
   batch: Uint16Array;
+  /** Palette index for each pin in `batch`. Always all-zero while the solver
+   *  runs in monochrome mode; matching length to `batch`. */
+  colors: Uint8Array;
   linesDrawn: number;
   done: boolean;
 }
@@ -30,6 +34,8 @@ export interface SolverInitExtras {
   faceW: number;
   faceH: number;
   faceEmphasis: number;
+  /** Flat sRGB bytes, length N*3. PR 2 only accepts N=1. */
+  paletteSrgb: Uint8Array;
 }
 
 export interface SolverWorkerApi {
