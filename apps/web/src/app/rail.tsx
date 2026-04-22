@@ -229,16 +229,24 @@ function PalettePicker({ disabled }: { disabled: boolean }) {
   const setPhysical = useSolverStore((s) => s.setPhysical);
   const storePalette = useSolverStore((s) => s.palette);
 
-  const mode = physical.paletteMode;
-  // In auto mode the slider drives the count and the last extracted palette
-  // populates the swatch strip as a preview. In manual mode the swatches are
-  // editable and the palette length is the count.
+  // A persisted session that predates the palette picker can have
+  // paletteMode / paletteCount missing. Treat that as "auto" with the
+  // current palette length so the picker still renders and the user
+  // can adjust. The migration in solver/store.ts fills these in on next
+  // load, but the guard keeps the UI from vanishing on the first render
+  // of an in-flight rehydrate.
+  const mode: PaletteMode = physical.paletteMode ?? "auto";
+  const paletteCount =
+    physical.paletteCount ?? Math.max(1, physical.palette?.length ?? 1);
   const previewPalette =
     mode === "auto" ? storePalette : physical.palette;
   const count =
     mode === "auto"
-      ? physical.paletteCount
-      : Math.max(1, Math.min(physical.palette.length, MAX_PALETTE_SIZE));
+      ? paletteCount
+      : Math.max(
+          1,
+          Math.min(physical.palette?.length ?? paletteCount, MAX_PALETTE_SIZE),
+        );
 
   const setMode = (next: PaletteMode) => {
     if (next === mode) return;
@@ -246,15 +254,15 @@ function PalettePicker({ disabled }: { disabled: boolean }) {
       // Seed manual from whatever palette we last had so the user starts
       // with a reasonable row instead of an empty one.
       const seed =
-        storePalette.length >= physical.paletteCount
-          ? storePalette.slice(0, physical.paletteCount)
+        storePalette.length >= paletteCount
+          ? storePalette.slice(0, paletteCount)
           : ensureLength(
               storePalette.length ? storePalette : [defaultSwatch()],
-              physical.paletteCount,
+              paletteCount,
             );
-      setPhysical({ paletteMode: "manual", palette: seed });
+      setPhysical({ paletteMode: "manual", palette: seed, paletteCount });
     } else {
-      setPhysical({ paletteMode: "auto" });
+      setPhysical({ paletteMode: "auto", paletteCount });
     }
   };
 
@@ -271,7 +279,7 @@ function PalettePicker({ disabled }: { disabled: boolean }) {
 
   const updateSwatch = (index: number, hex: string) => {
     if (mode !== "manual") return;
-    const next = physical.palette.slice();
+    const next = (physical.palette ?? []).slice();
     next[index] = hex;
     setPhysical({ palette: next });
   };
