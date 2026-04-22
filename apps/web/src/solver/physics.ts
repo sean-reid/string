@@ -80,6 +80,8 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   // algorithm uses ~4000 chords on a 300-pin board; we mirror that.
   lineBudget: 4000,
   minChordPct: 0.2,
+  // Single-thread mono: always black on cream board. No user-facing
+  // palette UI; color mode is disabled pending a better algorithm.
   palette: [DEFAULT_THREAD_COLOR],
 };
 
