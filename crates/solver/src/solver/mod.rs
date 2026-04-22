@@ -9,17 +9,30 @@
 //! has reached the target. This produces the sharp, dense portrait the
 //! original solver was tuned for.
 //!
-//! **Color** (palette length > 1): canvas + target in linear RGB, alpha
-//! compositing on deposit (`canvas += k · (thread - canvas)`), score is
-//! the projection of `target - canvas` onto `thread - canvas`. At each
-//! step the solver evaluates every (pin, palette-color) pair and picks
-//! the single chord that most reduces residual — no per-color budget,
-//! no forced sequential passes. This is the "just optimize" design:
-//! a color only draws when it's genuinely the best thread for the
-//! local residual, so bright threads don't retrace face pixels the
-//! dark thread already darkened. Regrouping for the physical build is
-//! done post-hoc in the UI so the spool count for the builder is
-//! still small.
+//! **Color** (palette length > 1): partitive (spatial-density) mixing
+//! model. At init each pixel's `target − board` is decomposed into a
+//! non-negative weighted sum of palette-thread contributions via NNLS,
+//! giving a per-thread scalar "density still to deposit" field — one
+//! mono-style residual per thread instead of one 3-channel canvas. A
+//! chord of thread i scores exactly like the mono solver on that
+//! thread's density field; a deposit subtracts `opacity · coverage`
+//! from it, clamped at zero. At every step the solver evaluates every
+//! (pin, thread) pair and picks the chord with the highest density-
+//! reducing score across all of them.
+//!
+//! Why partitive and not alpha compositing: physical string art on a
+//! dark board is spatial-frequency mixing. The eye integrates
+//! individual thread crossings over a patch; perceived color is the
+//! local density of each thread color plus whatever bare board shows
+//! through the gaps, not an alpha-composited canvas value at each
+//! pixel. Alpha compositing has a single "pixel is done" bit per
+//! pixel; partitive has a density budget per thread per pixel, so
+//! every color's chords keep earning their way in until their
+//! demanded density is met — same density-builds-naturally behavior
+//! mono gets. No "pixel saturated, score zero" premature stopping.
+//!
+//! Regrouping for the physical build is done post-hoc in the UI so
+//! the builder still switches spools rarely.
 //!
 //! State machine the front-end polls:
 //!   1. `new` allocates residual or canvas+target based on palette size.
@@ -76,18 +89,23 @@ impl Default for SolverConfig {
 }
 
 /// Mode-specific solver state. Mono keeps the legacy scalar residual;
-/// Color carries target + canvas buffers for alpha compositing.
+/// Color carries one scalar density residual per palette thread
+/// (partitive mixing — each pixel's target color decomposed into
+/// non-negative combinations of thread densities).
 enum SolverState {
     Mono {
         /// Scalar "brightness still needed", length width * height.
         residual: Vec<f32>,
     },
     Color {
-        /// Interleaved linear-RGB target, clamped at board-or-brighter,
-        /// length 3 * width * height.
-        target: Vec<f32>,
-        /// Interleaved linear-RGB canvas. Starts at `BOARD_LINEAR` and
-        /// is alpha-composited by each drawn thread.
+        /// One density residual per palette thread, each of length
+        /// `pixel_count`. `density[i][p]` is the remaining thread-i
+        /// coverage still to be laid at pixel p; chord deposits
+        /// subtract `opacity · coverage` from it, clamped at zero.
+        density: Vec<Vec<f32>>,
+        /// Alpha-composited preview canvas maintained for display.
+        /// Not used in scoring — that's purely the per-thread density
+        /// fields above.
         canvas: Vec<f32>,
     },
 }
@@ -149,45 +167,71 @@ impl Solver {
                 SolverState::Mono { residual }
             }
             Mode::Color => {
-                // Per-channel maximum the canvas can ever reach under
-                // unlimited deposits of any palette thread. Alpha
-                // compositing `canvas += k*(thread - canvas)` drives
-                // canvas toward whichever thread is depositing; with
-                // multiple threads the max reachable canvas is the
-                // per-channel max across threads. A target pixel
-                // brighter than this cap is unreachable — residual
-                // never hits zero there, the scoring never fully
-                // drops, and the solver keeps piling thread through
-                // that region trying to close a gap that can't
-                // close. Clamping the target at the cap makes residual
-                // saturate exactly when canvas reaches what threads
-                // can physically achieve, so scores drop to zero and
-                // the solver stops over-depositing on unreachable
-                // highlights.
-                let mut max_thread = [0.0f32; 3];
-                for thread in palette.colors() {
-                    max_thread[0] = max_thread[0].max(thread[0]);
-                    max_thread[1] = max_thread[1].max(thread[1]);
-                    max_thread[2] = max_thread[2].max(thread[2]);
+                // Partitive-mixing init. For each pixel we solve a
+                // tiny non-negative least squares problem: decompose
+                // (target − board) as a non-negative combination of
+                // (thread − board) vectors. The coefficients ARE the
+                // per-thread densities the solver must eventually lay
+                // down at that pixel. Density fields behave just like
+                // mono's scalar residual — one per thread — so the
+                // color solver is effectively K parallel mono solves
+                // coupled only at chord-selection time.
+                let k = palette.len();
+                let thread_basis: Vec<[f32; 3]> = palette
+                    .colors()
+                    .iter()
+                    .map(|c| {
+                        [
+                            (c[0] - BOARD_LINEAR[0]).max(0.0),
+                            (c[1] - BOARD_LINEAR[1]).max(0.0),
+                            (c[2] - BOARD_LINEAR[2]).max(0.0),
+                        ]
+                    })
+                    .collect();
+                // AtA is symmetric k×k, precomputed once for the NNLS
+                // multiplicative update rule.
+                let mut ata = vec![0.0f32; k * k];
+                for i in 0..k {
+                    for j in 0..k {
+                        ata[i * k + j] = thread_basis[i][0] * thread_basis[j][0]
+                            + thread_basis[i][1] * thread_basis[j][1]
+                            + thread_basis[i][2] * thread_basis[j][2];
+                    }
                 }
 
-                let mut target = Vec::with_capacity(pixel_count * 3);
-                for i in 0..pixel_count {
-                    let base = i * 4;
-                    let tr = srgb_to_linear(preprocessed_rgba[base] as f32 / 255.0);
-                    let tg = srgb_to_linear(preprocessed_rgba[base + 1] as f32 / 255.0);
-                    let tb = srgb_to_linear(preprocessed_rgba[base + 2] as f32 / 255.0);
-                    target.push(tr.clamp(BOARD_LINEAR[0], max_thread[0]));
-                    target.push(tg.clamp(BOARD_LINEAR[1], max_thread[1]));
-                    target.push(tb.clamp(BOARD_LINEAR[2], max_thread[2]));
+                let mut density: Vec<Vec<f32>> =
+                    (0..k).map(|_| vec![0.0f32; pixel_count]).collect();
+                let mut w = vec![0.0f32; k];
+                let mut atb = vec![0.0f32; k];
+                for (pix, bgra) in preprocessed_rgba
+                    .chunks_exact(4)
+                    .enumerate()
+                    .take(pixel_count)
+                {
+                    let tr = srgb_to_linear(bgra[0] as f32 / 255.0);
+                    let tg = srgb_to_linear(bgra[1] as f32 / 255.0);
+                    let tb = srgb_to_linear(bgra[2] as f32 / 255.0);
+                    let b = [
+                        (tr - BOARD_LINEAR[0]).max(0.0),
+                        (tg - BOARD_LINEAR[1]).max(0.0),
+                        (tb - BOARD_LINEAR[2]).max(0.0),
+                    ];
+                    for (i, basis) in thread_basis.iter().enumerate() {
+                        atb[i] = basis[0] * b[0] + basis[1] * b[1] + basis[2] * b[2];
+                    }
+                    decompose_nnls(&ata, &atb, k, &mut w);
+                    for (i, field) in density.iter_mut().enumerate() {
+                        field[pix] = w[i];
+                    }
                 }
+
                 let mut canvas = Vec::with_capacity(pixel_count * 3);
                 for _ in 0..pixel_count {
                     canvas.push(BOARD_LINEAR[0]);
                     canvas.push(BOARD_LINEAR[1]);
                     canvas.push(BOARD_LINEAR[2]);
                 }
-                SolverState::Color { target, canvas }
+                SolverState::Color { density, canvas }
             }
         };
 
@@ -261,13 +305,11 @@ impl Solver {
         d.min(n - d)
     }
 
-    /// Score every legal (pin, palette-color) candidate. Mono has only
-    /// one palette entry so it reduces to per-pin scoring; color mode
-    /// evaluates each candidate against every thread, returning a flat
-    /// list of `(pin, color_index, score)` tuples. The caller picks
-    /// the best across the full list, so the solver naturally switches
-    /// colors when another thread reduces residual more than the
-    /// current best.
+    /// Score every legal (pin, palette-color) candidate. Mono has one
+    /// scalar residual; color has one scalar density residual per
+    /// palette thread. Both reduce to the same per-chord scoring form —
+    /// weighted average residual along the chord — so color mode is
+    /// effectively K parallel mono solves.
     fn score_candidates(&self) -> Vec<(u16, u8, f32)> {
         let n = self.config.pin_count;
         let (cx, cy) = self.pin_position(self.current);
@@ -282,7 +324,7 @@ impl Solver {
             let (qx, qy) = self.pin_position(i);
             match &self.state {
                 SolverState::Mono { residual } => {
-                    let s = score_chord_mono(
+                    let s = score_chord_scalar(
                         residual,
                         &self.weights,
                         self.width,
@@ -292,18 +334,15 @@ impl Solver {
                     );
                     out.push((i, 0u8, s));
                 }
-                SolverState::Color { target, canvas } => {
-                    for (c_idx, thread) in self.palette.colors().iter().enumerate() {
-                        let s = score_chord_alpha(
-                            target,
-                            canvas,
+                SolverState::Color { density, .. } => {
+                    for (c_idx, field) in density.iter().enumerate() {
+                        let s = score_chord_scalar(
+                            field,
                             &self.weights,
                             self.width,
                             self.height,
                             (cx, cy),
                             (qx, qy),
-                            *thread,
-                            self.config.opacity,
                         );
                         out.push((i, c_idx as u8, s));
                     }
@@ -390,8 +429,22 @@ impl Solver {
                         self.config.opacity,
                     );
                 }
-                SolverState::Color { canvas, .. } => {
-                    let thread = self.palette.colors()[color_index as usize];
+                SolverState::Color { density, canvas } => {
+                    let idx = color_index as usize;
+                    // Density-residual update (the scoring signal):
+                    // the thread-i field loses `opacity · coverage`
+                    // at every touched pixel, clamped at zero.
+                    deposit_mono(
+                        &mut density[idx],
+                        self.width,
+                        self.height,
+                        endpoints,
+                        self.config.opacity,
+                    );
+                    // Preview canvas (display only, not scored on):
+                    // alpha composite so the rendered output matches
+                    // what the builder actually sees as threads stack.
+                    let thread = self.palette.colors()[idx];
                     deposit_alpha(
                         canvas,
                         self.width,
@@ -416,11 +469,11 @@ impl Solver {
     }
 }
 
-/// Mono-mode chord score: the original scalar-residual formulation.
-/// Sums residual × coverage × weight along the chord, normalized by
-/// weighted coverage. Lines in low-residual regions score low; lines
-/// across bright regions score high.
-fn score_chord_mono(
+/// Per-chord score for a scalar residual field: weighted average of
+/// `residual × coverage × weight` along the chord, normalized by
+/// weighted coverage. Used identically by mono (one residual) and
+/// color (one density residual per palette thread).
+fn score_chord_scalar(
     residual: &[f32],
     weights: &[f32],
     width: usize,
@@ -453,59 +506,31 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
     });
 }
 
-/// Alpha-aware chord score. For each pixel the chord touches we compute
-/// how much the alpha deposit
-/// `canvas_new = canvas_old + k · (thread - canvas_old)` (with
-/// `k = opacity · coverage`) moves the canvas toward the target,
-/// summed over channels. Each channel contribution is clamped at zero:
-/// a chord that would help two channels but overshoot the third no
-/// longer gets penalized by the overshoot channel, it just gets no
-/// credit for it.
-///
-/// This matters for density. The previous formulation used a raw
-/// `<residual, delta>` dot product that could go negative as pixels
-/// overshot in some channels; once enough pixels partially overshot,
-/// most chord options scored zero-or-negative and the solver ran out
-/// of productive chords long before the line budget, leaving the
-/// output visibly sparser than the monochrome solve at the same
-/// budget. Clamping per-channel keeps the pool of useful chords rich
-/// through the whole budget — matching mono's "every chord does
-/// *something* until you run out of lines" behavior.
-///
-/// Score is normalized by weighted coverage so long chords aren't
-/// unfairly favored.
-#[allow(clippy::too_many_arguments)]
-fn score_chord_alpha(
-    target: &[f32],
-    canvas: &[f32],
-    weights: &[f32],
-    width: usize,
-    height: usize,
-    p0: (f32, f32),
-    p1: (f32, f32),
-    thread: LinearRgb,
-    opacity: f32,
-) -> f32 {
-    let mut sum = 0.0f32;
-    let mut weight_sum = 0.0f32;
-    chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, width, height, |idx, cov| {
-        let w = weights[idx];
-        let k = opacity * cov;
-        let base = idx * 3;
-        let rr = target[base] - canvas[base];
-        let rg = target[base + 1] - canvas[base + 1];
-        let rb = target[base + 2] - canvas[base + 2];
-        let dr = thread[0] - canvas[base];
-        let dg = thread[1] - canvas[base + 1];
-        let db = thread[2] - canvas[base + 2];
-        let useful = (rr * dr).max(0.0) + (rg * dg).max(0.0) + (rb * db).max(0.0);
-        sum += useful * k * w;
-        weight_sum += cov * w;
-    });
-    if weight_sum > 0.0 {
-        sum / weight_sum
-    } else {
-        0.0
+/// Solve a tiny non-negative least squares problem with the
+/// multiplicative update rule (Lee & Seung 2000). Finds
+/// `w ≥ 0` minimizing `‖A w − b‖²` where `AtA` is the precomputed
+/// `A^T A` (kxk row-major) and `atb` is `A^T b`. In our setting `A`
+/// is the `3 × k` palette-basis matrix (`thread - board` per column)
+/// and `b` is `target - board` at the pixel. 20 iterations are plenty
+/// for k ≤ 8 and the small dynamic range we operate in. Writes into
+/// `w` in place; caller seeds the initial guess (we use a small
+/// positive constant).
+fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
+    // Seed strictly positive so the multiplicative update has
+    // something to scale. Near-zero is fine — the update converges
+    // to the NNLS optimum regardless of seed.
+    for wi in w.iter_mut().take(k) {
+        *wi = 1e-3;
+    }
+    for _ in 0..20 {
+        for i in 0..k {
+            let num = atb[i].max(0.0);
+            let mut den = 0.0f32;
+            for j in 0..k {
+                den += ata[i * k + j] * w[j];
+            }
+            w[i] *= (num + 1e-9) / (den + 1e-9);
+        }
     }
 }
 

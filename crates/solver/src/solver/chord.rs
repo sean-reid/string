@@ -92,6 +92,7 @@ pub fn score_chord(
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Endpoints {
     pub x0: f32,
     pub y0: f32,
