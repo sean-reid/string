@@ -1,7 +1,7 @@
 //! Thread palette: the set of colors the solver can choose from when picking
-//! a chord. PR 2 only threads this through the pipeline at the data-model
-//! level; the solver still runs the legacy scalar-residual path when the
-//! palette has exactly one color.
+//! a chord. A palette of one color runs the legacy scalar-residual path
+//! unchanged; multi-color palettes drive the RGB residual and per-line
+//! thread selection.
 
 /// Linear-RGB thread color.
 pub type LinearRgb = [f32; 3];
@@ -58,11 +58,14 @@ pub fn srgb_to_linear(u: f32) -> f32 {
     }
 }
 
-/// The solver loop today works on a single scalar residual (luminance). The
-/// `Mode` enum tags which code path is active. PR 3 will add `Color`.
+/// Which residual representation + scoring path the solver is running.
+/// `Mono` keeps a single scalar residual (luminance) for byte-compatible
+/// behavior with the pre-palette solver. `Color` uses an interleaved RGB
+/// residual and picks each line's thread color from the palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Mono,
+    Color,
 }
 
 #[cfg(test)]
