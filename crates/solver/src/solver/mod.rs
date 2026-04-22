@@ -7,6 +7,7 @@
 //!   3. `is_done()` flips true when the line budget is reached.
 
 pub mod chord;
+pub mod palette;
 pub mod weight;
 
 use rand::{Rng, SeedableRng};
@@ -14,6 +15,7 @@ use rand_chacha::ChaCha8Rng;
 use std::collections::VecDeque;
 
 use self::chord::{draw_chord, Endpoints};
+use self::palette::{Mode, Palette};
 use self::weight::{with_face_emphasis, FaceBox};
 
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +51,9 @@ pub struct Solver {
     residual: Vec<f32>,
     weights: Vec<f32>,
     config: SolverConfig,
+    palette: Palette,
+    mode: Mode,
+    last_batch_len: usize,
     rng: ChaCha8Rng,
     current: u16,
     ban_queue: VecDeque<u16>,
@@ -60,6 +65,7 @@ impl Solver {
         preprocessed_rgba: &[u8],
         size: usize,
         config: SolverConfig,
+        palette: Palette,
         seed: u64,
         face: Option<FaceBox>,
         face_emphasis: f32,
@@ -70,6 +76,11 @@ impl Solver {
         if config.pin_count < 8 {
             return Err("pin_count must be at least 8");
         }
+        let mode = match palette.len() {
+            0 => return Err("palette must have at least one color"),
+            1 => Mode::Mono,
+            _ => return Err("multi-color palettes not yet supported (PR 3)"),
+        };
         let pixel_count = size * size;
         let mut residual = Vec::with_capacity(pixel_count);
         for i in 0..pixel_count {
@@ -91,11 +102,28 @@ impl Solver {
             residual,
             weights,
             config,
+            palette,
+            mode,
+            last_batch_len: 0,
             rng: ChaCha8Rng::seed_from_u64(seed),
             current: 0,
             ban_queue: VecDeque::with_capacity(config.ban_window as usize),
             lines_drawn: 0,
         })
+    }
+
+    pub fn palette_size(&self) -> u8 {
+        self.palette.len() as u8
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Returns the palette index assigned to each pin in the most recent
+    /// `step_many` call. Mono mode always returns a run of zeros.
+    pub fn last_batch_colors(&self) -> Vec<u8> {
+        vec![0u8; self.last_batch_len]
     }
 
     pub fn pin_count(&self) -> u16 {
@@ -230,6 +258,7 @@ impl Solver {
             self.lines_drawn += 1;
             out.push(next);
         }
+        self.last_batch_len = out.len();
         out
     }
 }
@@ -305,6 +334,10 @@ mod tests {
         assert!(ys[0] < cy, "pin 0 should be above center");
     }
 
+    fn mono_palette() -> Palette {
+        Palette::from_srgb_bytes(&[0xF4, 0xEF, 0xE5]).unwrap()
+    }
+
     #[test]
     fn solver_progresses_and_terminates() {
         let size = 64;
@@ -314,7 +347,8 @@ mod tests {
             line_budget: 50,
             ..Default::default()
         };
-        let mut solver = Solver::new(&rgba, size, config, 42, None, 0.0).expect("solver init");
+        let mut solver =
+            Solver::new(&rgba, size, config, mono_palette(), 42, None, 0.0).expect("solver init");
         let mut drawn = 0u32;
         while !solver.is_done() {
             let batch = solver.step_many(10);
@@ -322,6 +356,15 @@ mod tests {
                 break;
             }
             drawn += batch.len() as u32;
+            assert_eq!(
+                solver.last_batch_colors().len(),
+                batch.len(),
+                "color batch matches pin batch length"
+            );
+            assert!(
+                solver.last_batch_colors().iter().all(|&c| c == 0),
+                "mono mode emits color index 0 for every line"
+            );
         }
         assert_eq!(drawn, config.line_budget);
         assert_eq!(solver.lines_drawn(), config.line_budget);
@@ -337,15 +380,55 @@ mod tests {
             ..Default::default()
         };
         let run = |seed: u64| -> Vec<u16> {
-            let mut s = Solver::new(&rgba, size, config, seed, None, 0.0).unwrap();
-            let mut pins = Vec::new();
-            while !s.is_done() {
-                pins.extend(s.step_many(30));
-                break;
-            }
-            pins
+            let mut s = Solver::new(&rgba, size, config, mono_palette(), seed, None, 0.0).unwrap();
+            s.step_many(config.line_budget)
         };
         assert_eq!(run(7), run(7), "same seed should produce same sequence");
         assert_ne!(run(7), run(11), "different seeds should differ");
     }
+
+    #[test]
+    fn solver_rejects_multi_color_palettes_for_now() {
+        let size = 32;
+        let rgba = rgba_gradient(size);
+        let palette = Palette::from_srgb_bytes(&[255, 0, 0, 0, 0, 255]).unwrap();
+        let result = Solver::new(&rgba, size, SolverConfig::default(), palette, 0, None, 0.0);
+        match result {
+            Ok(_) => panic!("multi-color palette should be rejected in PR 2"),
+            Err(msg) => assert!(msg.contains("PR 3"), "error mentions PR 3 landing: {msg}"),
+        }
+    }
+
+    /// Golden test: monochrome path is byte-identical to pre-refactor for a
+    /// fixed fixture + seed. Guards every later PR against accidentally
+    /// changing the legacy behavior.
+    #[test]
+    fn mono_golden_sequence_matches_vhead() {
+        let size = 64usize;
+        let rgba = rgba_gradient(size);
+        let config = SolverConfig {
+            pin_count: 48,
+            line_budget: 40,
+            ..Default::default()
+        };
+        let mut s = Solver::new(&rgba, size, config, mono_palette(), 42, None, 0.0).unwrap();
+        let mut pins = Vec::new();
+        while !s.is_done() {
+            let batch = s.step_many(40);
+            if batch.is_empty() {
+                break;
+            }
+            pins.extend(batch);
+        }
+        assert_eq!(pins, GOLDEN_MONO_SEQUENCE_SEED42);
+    }
+
+    // Captured against the mono (pre-multi-color) solver at commit
+    // feat/solver-palette-plumbing: 64x64 gradient, seed 42, 48 pins, 40 lines.
+    // Any change to this sequence must be justified by an intended algorithm
+    // change; accidental drift during a refactor is the bug this test catches.
+    const GOLDEN_MONO_SEQUENCE_SEED42: &[u16] = &[
+        17, 29, 14, 26, 13, 25, 11, 23, 10, 22, 9, 21, 7, 19, 6, 24, 12, 27, 15, 28, 16, 30, 18, 5,
+        20, 8, 26, 14, 31, 13, 29, 11, 32, 17, 4, 21, 6, 23, 9, 24,
+    ];
 }
