@@ -31,13 +31,11 @@ export default defineConfig({
       "@solver": path.resolve(__dirname, "../../crates/solver/pkg"),
     },
   },
-  server: {
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
-      "Cross-Origin-Resource-Policy": "same-origin",
-    },
-  },
+  // The production site sets COOP/COEP/CORP via apps/web/public/_headers
+  // (see Cloudflare Pages). Replicating require-corp on the Vite dev server
+  // breaks module workers, because Vite serves them from internal /@fs/
+  // paths without matching CORP headers. The app doesn't use
+  // SharedArrayBuffer, so cross-origin isolation is not required.
   worker: {
     format: "es",
   },
