@@ -55,6 +55,10 @@ export const BOARDS: Record<BoardId, BoardSpec> = {
 /** Internal solver resolution. The preprocessor crops to this size. */
 export const SOLVE_RESOLUTION_PX = 700;
 
+export type PaletteMode = "auto" | "manual";
+
+export const MAX_PALETTE_SIZE = 6;
+
 export interface PhysicalParams {
   boardId: BoardId;
   threadId: ThreadId;
@@ -62,8 +66,16 @@ export interface PhysicalParams {
   lineBudget: number;
   /** Minimum chord length as a fraction of the board diameter. */
   minChordPct: number;
-  /** sRGB hex strings, one per thread color in the palette. Length 1 is
-   *  monochrome (the legacy behavior); PR 5 lets the user extend it. */
+  /** How palette colors are picked:
+   *  - "auto": k-means on the source image, `paletteCount` colors out
+   *  - "manual": the user provides `palette` directly */
+  paletteMode: PaletteMode;
+  /** Requested palette size (1..=MAX_PALETTE_SIZE). Only consulted in
+   *  "auto" mode; manual palettes use `palette.length`. */
+  paletteCount: number;
+  /** sRGB hex strings. In auto mode this is the last extracted palette
+   *  and serves as a preview until the next solve; in manual mode it is
+   *  the authoritative set of thread colors. */
   palette: string[];
 }
 
@@ -73,6 +85,8 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   pinCount: 288,
   lineBudget: 1500,
   minChordPct: 0.2,
+  paletteMode: "auto",
+  paletteCount: 1,
   palette: [DEFAULT_THREAD_COLOR],
 };
 
@@ -169,5 +183,17 @@ export function paletteToSrgbBytes(palette: readonly string[]): Uint8Array {
     out[i * 3 + 1] = rgb[1];
     out[i * 3 + 2] = rgb[2];
   });
+  return out;
+}
+
+/** Inverse of parseHexColor for rendering swatch labels. */
+export function srgbBytesToHex(bytes: Uint8Array): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + 2 < bytes.length; i += 3) {
+    const r = (bytes[i] ?? 0).toString(16).padStart(2, "0");
+    const g = (bytes[i + 1] ?? 0).toString(16).padStart(2, "0");
+    const b = (bytes[i + 2] ?? 0).toString(16).padStart(2, "0");
+    out.push(`#${r}${g}${b}`);
+  }
   return out;
 }
