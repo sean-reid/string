@@ -19,7 +19,11 @@ const STROKE_BATCH = 16;
 export function LinesCanvas() {
   const sequence = useSolverStore((s) => s.sequence);
   const sequenceColors = useSolverStore((s) => s.sequenceColors);
-  const palette = useSolverStore((s) => s.palette);
+  // Render using the user's actual palette, not store.palette (which
+  // is the image-derived suggestion list for the "+" / auto-pick
+  // buttons). Editing a swatch in the UI must take effect on the
+  // rendered preview.
+  const palette = useSolverStore((s) => s.physical.palette);
   const pinPositions = useSolverStore((s) => s.pinPositions);
   const imageSize = useSolverStore((s) => s.imageSize);
   const generationId = useSolverStore((s) => s.generationId);

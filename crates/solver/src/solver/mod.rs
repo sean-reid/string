@@ -283,7 +283,7 @@ impl Solver {
                     for (i, basis) in thread_basis.iter().enumerate() {
                         atb[i] = basis[0] * b[0] + basis[1] * b[1] + basis[2] * b[2];
                     }
-                    decompose_nnls(&ata, &atb, k, &mut w);
+                    decompose_nnls(&ata, &atb, k, &thread_basis, &mut w);
                     for (i, field) in density.iter_mut().enumerate() {
                         field[pix] = w[i];
                     }
@@ -632,30 +632,27 @@ fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints,
     });
 }
 
-/// Orthogonal matching pursuit (OMP) for a tiny NNLS problem. Picks
-/// threads one at a time in order of which reduces residual fastest,
-/// so the decomposition stays sparse — typically 1–2 active threads
-/// per pixel — rather than smearing weight across every thread like a
-/// full multiplicative-update NNLS does when the basis is ill-
-/// conditioned (dark threads' `board − thread_i` all point in roughly
-/// the same direction, which is our exact situation).
+/// Hybrid decomposition: split the board-minus-target residual `b`
+/// into a chromatic part (perceived hue) and an achromatic part
+/// (uniform darkening). The chromatic part is solved with OMP on the
+/// per-thread *chromatic* basis — so colored threads compete to
+/// explain hue — and the achromatic part is assigned entirely to
+/// the most-achromatic thread (typically the black primary).
 ///
-/// Sparse decomposition gives three properties we need at once:
+/// Why the split: our canonical palette includes black, which has a
+/// large `board − thread` basis magnitude but a near-zero chromatic
+/// component. OMP on the raw darkening basis always picked black
+/// first because its basis magnitude swamped any colored thread's.
+/// The chromatic threads were then left to explain a small leftover
+/// residual, getting tiny coefficients — which translated to the
+/// solver picking black for almost every chord and color mode
+/// rendering as near-monochrome.
 ///
-/// 1. **Luminance structure is preserved.** Per-pixel density
-///    magnitude scales with `|b|`, so bright pixels (b small) demand
-///    few chord crossings and dark pixels (b large) demand many —
-///    the face-structure-from-luminance signal mono relies on stays
-///    intact.
-/// 2. **Color diversity is preserved.** Different pixels, guided by
-///    hue, pick different threads. A chord through a warm-skin
-///    region scores high for a warm thread; a chord through a dark
-///    shadow scores high for the darker thread.
-/// 3. **Numerical stability.** Greedy-sparse doesn't rely on
-///    precisely-determined weights from an ill-conditioned system,
-///    so tiny numerical differences don't flip pixels between
-///    threads and create incoherent noise.
-fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
+/// Splitting lets black and the colored threads each handle the part
+/// of the residual they're actually shaped for: black for luminance,
+/// colored primaries for hue. Colored threads get coefficients of
+/// meaningful magnitude and the solver actually uses them.
+fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, basis: &[[f32; 3]], w: &mut [f32]) {
     for wi in w.iter_mut().take(k) {
         *wi = 0.0;
     }
@@ -663,16 +660,92 @@ fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
         return;
     }
 
-    // Residual projections — one per thread. Starts as `atb` and is
-    // reduced whenever a thread is selected and its component subtracted.
-    let mut proj = atb.to_vec();
-    // Track used threads so we don't pick the same one twice.
-    let mut used = vec![false; k];
+    // Detect the most-achromatic thread: the one whose chromatic
+    // basis (basis minus its min channel) has the smallest magnitude
+    // relative to its full basis norm. Black and near-black threads
+    // have near-zero chromatic magnitude; saturated primaries have
+    // large chromatic magnitude. The "achromatic" thread gets the
+    // uniform-darkening leftover after the colored threads have done
+    // their work on the chromatic part of the residual.
+    //
+    // If *no* thread is clearly achromatic (e.g. all threads are
+    // saturated primaries with no black in the palette) then this
+    // picks the least-chromatic one and the split still produces
+    // sensible decompositions.
+    // A thread qualifies as "achromatic" only if its chromatic
+    // component is a small fraction of its total basis magnitude.
+    // For saturated primaries the ratio approaches 1 (pure chroma);
+    // for black and near-black the ratio is near 0. If no thread
+    // clears the threshold (e.g. a palette of only saturated
+    // primaries with no black), `achromatic` stays `None` and the
+    // decomposition runs pure OMP across all threads.
+    let mut achromatic: Option<usize> = None;
+    let mut min_ratio = f32::INFINITY;
+    for (i, b) in basis.iter().enumerate() {
+        let m = b[0].min(b[1]).min(b[2]);
+        let chrom_sq = (b[0] - m).powi(2) + (b[1] - m).powi(2) + (b[2] - m).powi(2);
+        let norm_sq = ata[i * k + i].max(1e-8);
+        let ratio = chrom_sq / norm_sq;
+        if ratio < min_ratio {
+            min_ratio = ratio;
+            if ratio < 0.3 {
+                achromatic = Some(i);
+            }
+        }
+    }
 
-    // At most `min(k, 3)` passes — three threads per pixel is more
-    // than enough expressive power; beyond that we're fitting noise.
-    let max_active = k.min(3);
-    for _ in 0..max_active {
+    // How chromatic is the current residual? Ratio of its chromatic
+    // magnitude to its total magnitude. Near 1 = strongly hued
+    // pixel (skin, colored object). Near 0 = uniform-dark pixel
+    // (hair, shadow). Drives the OMP gate below: on strongly hued
+    // pixels, exclude the achromatic thread from the first pass so
+    // colored threads get first crack at the residual; on uniform-
+    // dark pixels, let the achromatic thread compete normally.
+    //
+    // Without this gate, black always wins the first OMP pass on
+    // any palette that includes it (its basis has the highest raw
+    // magnitude of any dark thread), and every pixel ends up
+    // mostly-black with near-zero colored-thread density — the
+    // color signal never reaches the chord scorer.
+    //
+    // Separately: for mostly-achromatic pixels we want black too,
+    // not color. So only exclude achromatic when the residual is
+    // *actually* chromatic.
+    let b_full_sq = atb.iter().enumerate().fold(0.0f32, |acc, (i, &v)| {
+        // Approximate |b|² from (atb·proj)-ish — we don't have raw b
+        // here. Use the largest atb·atb/|basis|² ratio as a proxy;
+        // that's the projected length of b on whichever basis it
+        // aligns best with, which is an upper bound on |b|².
+        let nn = ata[i * k + i].max(1e-8);
+        let aligned_sq = v * v / nn;
+        acc.max(aligned_sq)
+    });
+    let exclude_achromatic_first_pass = if let Some(a) = achromatic {
+        // Compute how much of `b` the achromatic thread alone
+        // explains. If it's most of `b`, the residual after black
+        // would be small and chromatic — so black should go first
+        // (skip exclusion). If it's only a fraction, the residual
+        // IS chromatic and we should handle color first.
+        let aligned_sq_a = atb[a] * atb[a] / ata[a * k + a].max(1e-8);
+        let chromatic_fraction = 1.0 - (aligned_sq_a / b_full_sq.max(1e-8)).clamp(0.0, 1.0);
+        chromatic_fraction > 0.35
+    } else {
+        false
+    };
+
+    // Step 1: OMP over candidate threads. If the pixel is strongly
+    // hued, exclude the achromatic thread for this pass. Cap at 2
+    // active threads total across steps 1+2.
+    let mut proj = atb.to_vec();
+    let mut used = vec![false; k];
+    if exclude_achromatic_first_pass {
+        if let Some(a) = achromatic {
+            used[a] = true;
+        }
+    }
+    let allowed_count = used.iter().filter(|u| !**u).count();
+    let max_step1 = allowed_count.min(2);
+    for _ in 0..max_step1 {
         let mut best_i = usize::MAX;
         let mut best_score = f32::NEG_INFINITY;
         for i in 0..k {
@@ -683,8 +756,6 @@ fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
             if norm_sq <= 1e-8 {
                 continue;
             }
-            // Cosine-scaled projection: how much of the current
-            // residual does thread i explain, per unit of its basis.
             let aligned = proj[i] / norm_sq.sqrt();
             if aligned > best_score {
                 best_score = aligned;
@@ -695,17 +766,22 @@ fn decompose_nnls(ata: &[f32], atb: &[f32], k: usize, w: &mut [f32]) {
             break;
         }
         used[best_i] = true;
-
-        // Magnitude along chosen basis:
-        // `w = (b · basis) / |basis|² = proj[i] / ata[i,i]`, clamped ≥ 0.
         let coeff = (proj[best_i] / ata[best_i * k + best_i]).max(0.0);
         w[best_i] += coeff;
-
-        // Subtract chosen thread's contribution from remaining
-        // residual projections: `proj[j] -= coeff · (basis_i · basis_j)
-        //                              = coeff · ata[i*k + j]`.
         for j in 0..k {
             proj[j] -= coeff * ata[best_i * k + j];
+        }
+    }
+
+    // Step 2: if we skipped the achromatic thread in step 1, give it
+    // a chance now with whatever's left of the residual.
+    if exclude_achromatic_first_pass {
+        if let Some(a) = achromatic {
+            let norm_sq = ata[a * k + a];
+            if norm_sq > 1e-8 {
+                let coeff = (proj[a] / norm_sq).max(0.0);
+                w[a] += coeff;
+            }
         }
     }
 }
