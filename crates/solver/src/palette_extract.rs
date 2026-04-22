@@ -38,18 +38,30 @@ const BLACK_SRGB: [u8; 3] = [0x11, 0x11, 0x11];
 /// `solver::mod::BOARD_LINEAR`.
 const BOARD_LINEAR: [f32; 3] = [0.904_587_8, 0.862_741_3, 0.784_452_6];
 
-/// Canonical thread-color vocabulary. Saturated primaries that
-/// partitive-mix well on a cream board. Ordered roughly by "how
-/// often a photographer's image needs this one" — black and warm
-/// first, greens and cyan last. sRGB bytes.
+/// Canonical thread-color vocabulary — the full set of saturated
+/// primaries the extractor ranks and picks from. These are all real
+/// embroidery/crochet thread colors, chosen to tile hue-space at
+/// roughly even intervals so a ranked top-N gives the palette that
+/// actually explains the image's gamut rather than always falling
+/// on the same six primaries. Dark-to-light luminance spread so
+/// the dark-first build order places deep shadows first.
 const CANONICAL_PRIMARIES: &[[u8; 3]] = &[
+    // Achromatic / near-black anchor for shadow luminance.
     [0x11, 0x11, 0x11], // black
+    // Warm half of the wheel.
     [0xb8, 0x1c, 0x1c], // saturated red
+    [0xd9, 0x5a, 0x1c], // orange (between red and yellow)
     [0xd9, 0xa8, 0x1c], // saturated yellow (mustard-warm)
-    [0x1c, 0x3c, 0xa8], // saturated blue
+    [0x8a, 0x3c, 0x2c], // brick / terracotta (warm shadow — hair, skin shadow)
+    [0xd9, 0x82, 0x82], // salmon / rose (soft warm — lips, cheek)
+    // Cool half of the wheel.
     [0x1c, 0x88, 0x50], // deep green
-    [0xa8, 0x1c, 0x88], // deep magenta
+    [0x3c, 0x5a, 0x1c], // olive / sage (earthy green)
     [0x1c, 0x88, 0xa8], // deep cyan
+    [0x1c, 0x70, 0x70], // teal (between cyan and green)
+    [0x1c, 0x3c, 0xa8], // saturated blue
+    [0x5a, 0x1c, 0xa8], // purple (between blue and magenta)
+    [0xa8, 0x1c, 0x88], // deep magenta
 ];
 
 /// Public entry point. Returns `k * 3` sRGB bytes of saturated thread
@@ -272,31 +284,35 @@ mod tests {
     }
 
     #[test]
-    fn warm_image_picks_red_and_yellow_over_blue() {
-        // A warm portrait's residual-vs-board lives in the red/yellow
-        // half of the color wheel. The canonical-primary extractor
-        // must rank red and yellow above blue/cyan/green.
+    fn warm_image_picks_warm_primaries_over_cool() {
+        // A warm portrait's residual lives in the red/yellow half of
+        // the wheel. With a larger canonical vocabulary the picks
+        // include finer warm subdivisions (orange, salmon, etc.) —
+        // the test just requires ZERO cool primaries in the top-4.
         let size = 96;
         let rgba = rgb_image(size, |_, _| [220, 160, 100]);
         let out = extract_palette_bytes(&rgba, size, 4, 0, None).unwrap();
         let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-        let has = |r: u8, g: u8, b: u8| hexes.iter().any(|c| c[0] == r && c[1] == g && c[2] == b);
-        assert!(has(0x11, 0x11, 0x11), "missing black: {hexes:?}");
-        assert!(has(0xb8, 0x1c, 0x1c), "missing saturated red: {hexes:?}");
-        assert!(has(0xd9, 0xa8, 0x1c), "missing saturated yellow: {hexes:?}");
+        let is_warm = |c: [u8; 3]| c[0] >= c[2]; // red/green >= blue
+        for c in &hexes {
+            if *c == BLACK_SRGB {
+                continue;
+            }
+            assert!(is_warm(*c), "unexpected cool primary in warm image: {c:?}");
+        }
     }
 
     #[test]
-    fn cool_image_picks_blue_over_red() {
+    fn cool_image_picks_cool_primary_over_warm() {
         let size = 96;
         let rgba = rgb_image(size, |_, _| [30, 80, 200]);
         let out = extract_palette_bytes(&rgba, size, 2, 0, None).unwrap();
         let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
         assert_eq!(hexes[0], BLACK_SRGB); // slot 0
-        assert_eq!(
-            hexes[1],
-            [0x1c, 0x3c, 0xa8],
-            "slot 1 should be blue: {hexes:?}"
+        let slot1 = hexes[1];
+        assert!(
+            slot1[2] > slot1[0],
+            "slot 1 should lean cool (blue > red): {slot1:?}"
         );
     }
 
