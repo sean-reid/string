@@ -460,12 +460,10 @@ export function WeaveArt() {
   );
 }
 
-/** Step 5: physical thread behavior with tangent continuity.
- *  Thread descends on the LEFT of nail 1, loops the long way around the
- *  nail (left, under, right, to the top), runs tangent along the tops of
- *  both nails, loops around the RIGHT of nail 2 (top, right, under, to
- *  the left), and ascends on the LEFT of nail 2. The vertical exit tail
- *  crosses the horizontal bridge to the left of nail 2. */
+/** Step 5: thread starts on the LEFT of nail 1, wraps 90° CCW down to its
+ *  BOTTOM, runs diagonally up to the TOP of nail 2, loops 270° CW around
+ *  nail 2 (top → right → bottom → left), and ascends on the LEFT. The
+ *  exit tail crosses the diagonal bridge just above-left of nail 2. */
 export function WrapArt() {
   const R = 5;
   const n1 = { x: 70, y: 94 };
@@ -474,7 +472,7 @@ export function WrapArt() {
   const d = `
     M 65 34
     L 65 94
-    A ${R} ${R} 0 1 1 70 89
+    A ${R} ${R} 0 0 0 70 99
     L 115 89
     A ${R} ${R} 0 1 1 110 94
     L 110 34
