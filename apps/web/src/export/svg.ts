@@ -1,14 +1,18 @@
 interface SvgExportInput {
   sequence: readonly number[];
+  /** Palette index per line, parallel to `sequence`. */
+  sequenceColors: readonly number[];
+  palette: readonly string[];
   pinPositions: Float32Array | null;
   imageSize: number;
   diameterMm: number;
-  threadColor: string;
   lineOpacity: number;
   lineWidthMm: number;
   backgroundColor: string;
   pinCount: number;
 }
+
+const FALLBACK_COLOR = "#f4efe5";
 
 function fmt(value: number): string {
   return value.toFixed(3).replace(/\.?0+$/, "");
@@ -16,9 +20,11 @@ function fmt(value: number): string {
 
 /**
  * Emit a print-ready SVG with a circular disk background, the circular
- * boundary, and every thread chord as an individual <line>. Coordinates
- * are in millimetres so it opens at real physical size in any vector
- * editor or plotter.
+ * boundary, and every thread chord as an individual `<line>`. Lines are
+ * grouped by palette color (`<g data-color="cN">`) to help downstream
+ * plotter / cutter tooling that picks one color per pen run.
+ * Coordinates are in millimetres so the file opens at real physical
+ * size in any vector editor.
  */
 export function renderSvg(input: SvgExportInput): string {
   if (!input.pinPositions || input.imageSize <= 0) {
@@ -28,7 +34,8 @@ export function renderSvg(input: SvgExportInput): string {
   const size = input.diameterMm;
   const scale = input.diameterMm / input.imageSize;
   const radius = size / 2;
-  const lines: string[] = [];
+  // One line list per palette entry; preserves solve order within a color.
+  const linesByColor: string[][] = input.palette.map(() => []);
 
   for (let i = 1; i < input.sequence.length; i++) {
     const from = input.sequence[i - 1];
@@ -45,10 +52,24 @@ export function renderSvg(input: SvgExportInput): string {
       ty === undefined
     )
       continue;
-    lines.push(
+    const color = input.sequenceColors[i] ?? 0;
+    const bucket = linesByColor[color] ?? linesByColor[0];
+    if (!bucket) continue;
+    bucket.push(
       `<line x1="${fmt(fx * scale)}" y1="${fmt(fy * scale)}" x2="${fmt(tx * scale)}" y2="${fmt(ty * scale)}" />`,
     );
   }
+
+  const groups: string[] = [];
+  linesByColor.forEach((lines, idx) => {
+    if (lines.length === 0) return;
+    const hex = input.palette[idx] ?? FALLBACK_COLOR;
+    groups.push(
+      `  <g data-color="c${idx}" stroke="${hex}" stroke-width="${input.lineWidthMm}" stroke-linecap="round" stroke-opacity="${input.lineOpacity}" fill="none">`,
+      ...lines.map((l) => `    ${l}`),
+      `  </g>`,
+    );
+  });
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
@@ -56,9 +77,7 @@ export function renderSvg(input: SvgExportInput): string {
     `  <title>String-art pattern, ${input.sequence.length - 1} lines on ${input.pinCount} nails</title>`,
     `  <rect width="${size}" height="${size}" fill="${input.backgroundColor}" />`,
     `  <circle cx="${radius}" cy="${radius}" r="${radius - 0.5}" fill="${input.backgroundColor}" stroke="#141311" stroke-width="0.25" />`,
-    `  <g stroke="${input.threadColor}" stroke-width="${input.lineWidthMm}" stroke-linecap="round" stroke-opacity="${input.lineOpacity}" fill="none">`,
-    ...lines.map((l) => `    ${l}`),
-    `  </g>`,
+    ...groups,
     `</svg>`,
     ``,
   ].join("\n");
