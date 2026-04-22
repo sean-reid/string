@@ -460,24 +460,24 @@ export function WeaveArt() {
   );
 }
 
-/** Step 5: continuous thread, asymmetric by design.
- *  Nail 1: clean CCW arc wrap on the LEFT side, no self-crossing.
- *  Nail 2: the thread runs past the top-right of the nail, loops CW around
- *  the right and under, then exits up-right from the lower-left of the
- *  nail — the entry and exit segments cross each other at the top-left. */
+/** Step 5: physical thread behavior with tangent continuity.
+ *  Thread descends on the LEFT of nail 1, loops the long way around the
+ *  nail (left, under, right, to the top), runs tangent along the tops of
+ *  both nails, loops around the RIGHT of nail 2 (top, right, under, to
+ *  the left), and ascends on the LEFT of nail 2. The vertical exit tail
+ *  crosses the horizontal bridge to the left of nail 2. */
 export function WrapArt() {
-  const R = 4.5;
-  const n1 = { x: 72, y: 84 };
-  const n2 = { x: 112, y: 82 };
+  const R = 5;
+  const n1 = { x: 70, y: 94 };
+  const n2 = { x: 115, y: 94 };
 
   const d = `
-    M 58 14
-    Q 60 42 64 72
-    A 13 13 0 1 0 80 94
-    Q 94 98 100 92
-    L 123 73
-    A 14 14 0 1 1 102 92
-    L 140 14
+    M 65 34
+    L 65 94
+    A ${R} ${R} 0 1 1 70 89
+    L 115 89
+    A ${R} ${R} 0 1 1 110 94
+    L 110 34
   `;
 
   return (
@@ -486,12 +486,11 @@ export function WrapArt() {
         d={d}
         fill="none"
         stroke={STROKE}
-        strokeWidth="1.5"
+        strokeWidth="1.4"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
 
-      {/* Nails drawn on top so their heads sit cleanly over the thread */}
       {[n1, n2].map((p, i) => (
         <g key={i}>
           <circle cx={p.x} cy={p.y} r={R} fill="#c8c2b5" stroke={STROKE} strokeWidth="0.8" />
@@ -499,40 +498,15 @@ export function WrapArt() {
         </g>
       ))}
 
-      {/* Accent dots on the outer side of each hook */}
-      <circle cx={n1.x - R - 7} cy={n1.y + 3} r="1.8" fill={ACCENT} />
-      <circle cx={n2.x + R + 12} cy={n2.y + 3} r="1.8" fill={ACCENT} />
-
-      {/* Labels */}
       <text
         x={W / 2}
-        y="20"
+        y="14"
         fontSize="9"
         fill={STROKE}
         textAnchor="middle"
         fontFamily="Berkeley Mono, ui-monospace, monospace"
       >
         alternate the wrap side
-      </text>
-      <text
-        x={n1.x - R - 10}
-        y={n1.y + R + 18}
-        fontSize="7"
-        fill={ACCENT}
-        textAnchor="middle"
-        fontFamily="Berkeley Mono, ui-monospace, monospace"
-      >
-        left
-      </text>
-      <text
-        x={n2.x + R + 10}
-        y={n2.y + R + 18}
-        fontSize="7"
-        fill={ACCENT}
-        textAnchor="middle"
-        fontFamily="Berkeley Mono, ui-monospace, monospace"
-      >
-        right
       </text>
       <text
         x={W / 2}
@@ -542,7 +516,7 @@ export function WrapArt() {
         textAnchor="middle"
         fontFamily="Berkeley Mono, ui-monospace, monospace"
       >
-        one nail left, the next right, back and forth
+        one nail left, the next right
       </text>
     </Frame>
   );
