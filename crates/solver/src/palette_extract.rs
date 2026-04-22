@@ -1,18 +1,33 @@
-//! Palette extraction for a photo. Given that threads physically ADD light
-//! on a dark board, a useful palette is one whose colors span the image's
-//! color gamut — interior pixels should be reachable as non-negative
-//! combinations of the palette. K-means centroids sit *inside* the color
-//! cloud, so their combinations can't reach extreme pixels (a brown-face
-//! photo yields brown-on-brown output).
+//! Palette extraction for a photo, tuned for **additive reconstruction**
+//! on a dark board. Threads physically add light; the palette must be a
+//! non-negative basis whose cone in linear RGB encloses every target
+//! pixel. Two pitfalls the naive "pick dominant image colors" approach
+//! runs into:
 //!
-//! This module picks palette entries via **brightness-anchored
-//! farthest-point sampling** in OkLab — slot 0 is the top-1% luminance
-//! mean (a robust "highlight" anchor), each subsequent slot is the pixel
-//! whose minimum distance to the already-picked set is maximum
-//! (Gonzalez 1985 k-center, 2-approximation of the optimal convex-hull
-//! sampling). A short k-means polish in linear RGB denoises the picks
-//! and settles them on the local cluster means while keeping their
-//! extreme positions.
+//! - **No luminance carrier.** If every palette entry is dim (e.g. all
+//!   skin tones on a face photo), each thread lifts the canvas by very
+//!   little per line and no combination can reach bright image regions.
+//! - **Collinear hues.** Skin tones all point in roughly the same RGB
+//!   direction; three of them span a sliver, not a cone. Target pixels
+//!   off that sliver are unreachable by any non-negative combination.
+//!
+//! Strategy:
+//!
+//! 1. Slot 0 is **always cream** (≈ `#f4efe5`, near-white). That
+//!    guarantees a luminance carrier regardless of the image.
+//! 2. Slots 1..k come from **farthest-point sampling** (Gonzalez 1985
+//!    k-center) anchored at cream, in OkLab — each new slot is the
+//!    image sample whose minimum distance to the already-picked set is
+//!    maximum. This picks hues that are as far from cream *and* from
+//!    each other as possible, spreading the palette's cone rather than
+//!    collapsing it.
+//! 3. Slots 1..k are **saturation-boosted** toward their hue's channel
+//!    extreme (largest channel scaled to ~1). Preserves each pick's hue
+//!    direction but restores the magnitude lost by picking a dim image
+//!    pixel. A faint-brown extract becomes a vivid brown thread; the
+//!    per-line contribution scales by the same factor.
+//! 4. A short k-means polish in linear RGB denoises single-pixel
+//!    anchors, holding slot 0 fixed so cream never drifts.
 //!
 //! Color space: samples are stored in linear sRGB (threads sum there);
 //! distance comparisons are in OkLab (perceptually uniform so picks
@@ -32,14 +47,15 @@ const MAX_K: usize = 8;
 /// denoise single-pixel anchors and settle each palette entry on the
 /// local cluster mean without moving it away from the gamut edge.
 const POLISH_ITERS: u32 = 2;
-/// Percentile of the brightest pixels averaged to form slot 0. A single
-/// brightest pixel is usually a JPEG artifact or a specular highlight;
-/// averaging the top 1% gives a robust "image highlight color".
-const HIGHLIGHT_PERCENTILE: f32 = 0.01;
-/// sRGB of the classic cream thread we fall back to when k=1 and as the
-/// mono default across the app. Keeping it in one place avoids drift
-/// between the solver, the rail default, and the mono golden test.
+/// sRGB of the classic cream thread. Slot 0 of every auto palette and
+/// the fallback single thread in mono mode. Keeping it in one place
+/// avoids drift between the solver, the rail default, and the mono
+/// golden test.
 const CREAM_SRGB: [u8; 3] = [0xF4, 0xEF, 0xE5];
+/// Target linear magnitude for saturation-boosted hue entries. 1.0
+/// would push each slot to its own channel's maximum; we leave a touch
+/// of headroom so boosted colors still look like thread (not neon).
+const HUE_BOOST_TARGET: f32 = 0.95;
 
 /// Rec.709 luminance of the dark disc the threads sit on. Every palette
 /// entry must exceed this by at least `MIN_PALETTE_MARGIN` — a thread
@@ -65,33 +81,88 @@ pub fn extract_palette_bytes(
     if !(1..=MAX_K).contains(&k) {
         return Err("palette size must be in 1..=8");
     }
+    let cream_linear = srgb_to_linear_triple(CREAM_SRGB);
     if k == 1 {
-        // Palette-of-one always means "the monochrome cream thread" — it
-        // is what the solver renders in mono mode, what the mono golden
-        // test pins, and what the UI uses as the default. Returning the
-        // image mean here would give a muddy swatch for most photos.
+        // Palette-of-one always means the mono cream thread — byte-equal
+        // to the legacy mono default, keeps the mono golden test stable.
         return Ok(CREAM_SRGB.to_vec());
     }
     let samples = downsample_linear_rgb(rgba, size);
     if samples.is_empty() {
+        // No usable samples (fully transparent image). Pad with cream.
         return Ok(CREAM_SRGB.repeat(k));
     }
-    // Exclude samples that can't be meaningfully rendered by any thread.
-    // Shadow pixels at or below board luminance are represented by absence
-    // of thread, not a dark thread — including them in the palette pool
-    // just burns slots on colors the solver will rarely pick.
-    let candidates = filter_above_board(&samples);
-    let pool = if candidates.len() >= k {
-        candidates
+
+    // Slot 0: cream, unconditional luminance carrier.
+    let mut palette = Vec::with_capacity(k);
+    palette.push(cream_linear);
+
+    // Slots 1..k: image-derived hues, chosen by FPS *anchored at cream*
+    // so the first pick is the image sample furthest from cream, the
+    // second is furthest from {cream, pick_1}, and so on. This spreads
+    // the hue cone instead of collapsing it.
+    let hue_pool = above_board_or_all(&samples);
+    let hue_picks = farthest_point_sampling_seeded(&hue_pool, k - 1, cream_linear, seed);
+
+    // Light k-means polish on the hue picks with cream pinned, so a
+    // single noisy anchor pixel settles on its local cluster mean but
+    // the luminance carrier doesn't drift toward image hue.
+    let mut working = palette.clone();
+    working.extend(hue_picks);
+    let polished = polish_kmeans_fixed_first(&hue_pool, working);
+
+    // Saturation-boost slots 1..k toward each entry's channel-maximum.
+    // Preserves hue direction (the cluster the picker found) while
+    // restoring the linear magnitude lost by picking a dim image pixel.
+    let boosted = boost_hue_slots(polished);
+    Ok(linear_to_srgb_bytes(&boosted))
+}
+
+fn srgb_to_linear_triple(bytes: [u8; 3]) -> [f32; 3] {
+    [
+        srgb_to_linear(bytes[0] as f32 / 255.0),
+        srgb_to_linear(bytes[1] as f32 / 255.0),
+        srgb_to_linear(bytes[2] as f32 / 255.0),
+    ]
+}
+
+fn above_board_or_all(samples: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let filtered = filter_above_board(samples);
+    // If the image is entirely dark (every sample sits at or below the
+    // board), fall back to the full set so we still return k colors.
+    if filtered.is_empty() {
+        samples.to_vec()
     } else {
-        // Fully dark image: fall back to the whole sample set and let the
-        // polish step settle. User can switch to manual mode if this
-        // photo genuinely wants dark threads.
-        samples.clone()
-    };
-    let picks = farthest_point_sampling(&pool, k, seed);
-    let polished = polish_kmeans(&pool, picks);
-    Ok(linear_to_srgb_bytes(&polished))
+        filtered
+    }
+}
+
+/// Pushes each entry's largest channel up to HUE_BOOST_TARGET while
+/// preserving the entry's direction in linear RGB. Entry 0 (cream) is
+/// left untouched. A black entry maps to black (no meaningful hue to
+/// boost).
+fn boost_hue_slots(palette: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
+    palette
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| if i == 0 { c } else { boost_entry(c) })
+        .collect()
+}
+
+fn boost_entry(c: [f32; 3]) -> [f32; 3] {
+    let max = c[0].max(c[1]).max(c[2]);
+    if max <= 1e-4 {
+        return c;
+    }
+    let scale = HUE_BOOST_TARGET / max;
+    // Clamp to valid linear range; a pre-boost entry already near 1.0
+    // stays near 1.0 (scale ≈ HUE_BOOST_TARGET ≈ 0.95, a small pull
+    // inward) rather than overshooting.
+    [
+        (c[0] * scale).min(HUE_BOOST_TARGET),
+        (c[1] * scale).min(HUE_BOOST_TARGET),
+        (c[2] * scale).min(HUE_BOOST_TARGET),
+    ]
 }
 
 /// Drop samples whose Rec.709 luminance is within `MIN_PALETTE_MARGIN` of
@@ -147,38 +218,29 @@ fn downsample_linear_rgb(rgba: &[u8], size: usize) -> Vec<[f32; 3]> {
     out
 }
 
-/// Farthest-point sampling in OkLab, seeded by a brightness-anchored slot 0.
-/// This is the Gonzalez 1985 k-center heuristic — for each new slot pick
-/// the sample whose minimum distance to the already-picked set is maximum.
-/// Approximates the convex hull vertices of the color cloud without
-/// computing a full hull.
-fn farthest_point_sampling(samples: &[[f32; 3]], k: usize, seed: u64) -> Vec<[f32; 3]> {
-    debug_assert!(k >= 2);
+/// Farthest-point sampling in OkLab, anchored at an explicit seed color
+/// (typically cream). Gonzalez 1985 k-center: each new pick is the image
+/// sample whose minimum OkLab distance to the already-picked set is
+/// maximum. Returns `k` samples drawn from the input pool.
+fn farthest_point_sampling_seeded(
+    samples: &[[f32; 3]],
+    k: usize,
+    anchor_linear: [f32; 3],
+    seed: u64,
+) -> Vec<[f32; 3]> {
+    if k == 0 || samples.is_empty() {
+        return Vec::new();
+    }
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    // Precompute OkLab for every sample once. Cheaper than reconverting
-    // inside the inner-loop distance check.
+    let anchor_lab = linear_rgb_to_oklab(anchor_linear);
     let labs: Vec<[f32; 3]> = samples.iter().map(|&c| linear_rgb_to_oklab(c)).collect();
 
+    // Distances to the anchor seed initialize the working set.
+    let mut dists: Vec<f32> = labs.iter().map(|l| sq_dist(l, &anchor_lab)).collect();
     let mut picks: Vec<usize> = Vec::with_capacity(k);
-    // Slot 0: mean of the top-HIGHLIGHT_PERCENTILE brightest samples in
-    // OkLab `L`. Averaging the top 1% resists single-pixel noise and
-    // guarantees at least one bright thread in the palette.
-    picks.push(highlight_anchor_index(&labs));
-    // Distances to the already-picked set, in OkLab units. Initialized
-    // to the distance from slot 0.
-    let mut dists = vec![f32::INFINITY; samples.len()];
-    for (i, l) in labs.iter().enumerate() {
-        let d = sq_dist(l, &labs[picks[0]]);
-        if d < dists[i] {
-            dists[i] = d;
-        }
-    }
 
     while picks.len() < k {
-        // Pick the sample whose min-distance to the set is maximum. When
-        // there is a tie, break it deterministically via the RNG — keeps
-        // seed-stability without biasing toward low indices.
         let mut best = 0usize;
         let mut best_d = f32::NEG_INFINITY;
         let mut tied = 0u32;
@@ -189,18 +251,18 @@ fn farthest_point_sampling(samples: &[[f32; 3]], k: usize, seed: u64) -> Vec<[f3
                 tied = 1;
             } else if (d - best_d).abs() < 1e-6 {
                 tied += 1;
-                // Reservoir-sample among ties.
+                // Reservoir-sample among ties for seed stability.
                 if rng.gen_range(0..tied) == 0 {
                     best = i;
                 }
             }
         }
         if best_d <= 0.0 {
-            // All remaining samples are duplicates of existing picks. Pad
-            // with the last pick so the palette still has the expected
-            // length; the UI will dedupe or the user can edit in manual.
+            // Remaining samples are duplicates of existing picks or the
+            // anchor. Pad with the last pick so the caller always gets
+            // `k` entries.
             while picks.len() < k {
-                picks.push(*picks.last().expect("non-empty"));
+                picks.push(*picks.last().unwrap_or(&best));
             }
             break;
         }
@@ -217,71 +279,31 @@ fn farthest_point_sampling(samples: &[[f32; 3]], k: usize, seed: u64) -> Vec<[f3
     picks.into_iter().map(|i| samples[i]).collect()
 }
 
-fn highlight_anchor_index(labs: &[[f32; 3]]) -> usize {
-    if labs.is_empty() {
-        return 0;
+/// Short k-means polish with slot 0 pinned. Every iteration reassigns
+/// samples to their nearest palette entry in linear RGB, then recomputes
+/// the non-first centroids from the current clusters. The first centroid
+/// (the cream anchor) is left untouched so it doesn't drift into image
+/// hue.
+fn polish_kmeans_fixed_first(samples: &[[f32; 3]], init: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
+    if init.is_empty() {
+        return init;
     }
-    let count = ((labs.len() as f32) * HIGHLIGHT_PERCENTILE).ceil() as usize;
-    let count = count.max(1).min(labs.len());
-    // Partial sort to find the top-`count` brightest in OkLab L.
-    let mut idx: Vec<usize> = (0..labs.len()).collect();
-    idx.select_nth_unstable_by(labs.len() - count, |&a, &b| {
-        labs[a][0]
-            .partial_cmp(&labs[b][0])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top = &idx[labs.len() - count..];
-    // Return the sample closest to the mean of the top-brightness cluster.
-    let mut mean_l = 0.0f32;
-    let mut mean_a = 0.0f32;
-    let mut mean_b = 0.0f32;
-    for &i in top {
-        mean_l += labs[i][0];
-        mean_a += labs[i][1];
-        mean_b += labs[i][2];
-    }
-    let inv = 1.0 / top.len() as f32;
-    let target = [mean_l * inv, mean_a * inv, mean_b * inv];
-    let mut best = top[0];
-    let mut best_d = f32::INFINITY;
-    for &i in top {
-        let d = sq_dist(&labs[i], &target);
-        if d < best_d {
-            best_d = d;
-            best = i;
-        }
-    }
-    best
-}
-
-/// Short k-means polish around the FPS picks. Assigns every sample to its
-/// nearest pick in linear-RGB space, then re-computes each pick as the
-/// cluster mean. Small number of iterations — enough to denoise a noisy
-/// individual anchor pixel without dragging the picks off the gamut edge.
-fn polish_kmeans(samples: &[[f32; 3]], init: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
     let mut centroids = init;
+    let k = centroids.len();
     let mut assignments = vec![0usize; samples.len()];
     for _ in 0..POLISH_ITERS {
         if !assign_to_nearest(samples, &centroids, &mut assignments) {
             break;
         }
-        centroids = recompute_centroids(samples, &assignments, &centroids, centroids.len());
+        let fresh = recompute_centroids(samples, &assignments, &centroids, k);
+        // Pin slot 0; let the hue slots move.
+        centroids
+            .iter_mut()
+            .enumerate()
+            .skip(1)
+            .for_each(|(i, c)| *c = fresh[i]);
     }
-    sort_by_population(
-        samples,
-        &assignments,
-        centroids,
-        assignments_len(&assignments),
-    )
-}
-
-fn assignments_len(assignments: &[usize]) -> usize {
-    assignments
-        .iter()
-        .copied()
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0)
+    centroids
 }
 
 /// Convert linear sRGB (0..1) to OkLab. OkLab is nearly perceptually
@@ -354,22 +376,6 @@ fn recompute_centroids(
     out
 }
 
-fn sort_by_population(
-    samples: &[[f32; 3]],
-    assignments: &[usize],
-    centroids: Vec<[f32; 3]>,
-    k: usize,
-) -> Vec<[f32; 3]> {
-    let mut counts = vec![0u32; k];
-    for &a in assignments {
-        counts[a] += 1;
-    }
-    let _ = samples; // counts already encode sample weight
-    let mut order: Vec<usize> = (0..k).collect();
-    order.sort_by(|&a, &b| counts[b].cmp(&counts[a]));
-    order.into_iter().map(|i| centroids[i]).collect()
-}
-
 fn linear_to_srgb_bytes(centroids: &[[f32; 3]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(centroids.len() * 3);
     for c in centroids {
@@ -430,7 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn three_panels_extract_three_clusters() {
+    fn three_panels_with_k_four_yields_cream_plus_rgb() {
+        // k=4 gives cream (slot 0) plus three image-derived hues. On an
+        // R/G/B panel image FPS-after-cream picks one pixel per primary,
+        // and the saturation boost pushes each to near-max on its strong
+        // channel.
         let size = 96;
         let rgba = rgb_image(size, |x, _| {
             if x < size / 3 {
@@ -441,27 +451,56 @@ mod tests {
                 [20, 20, 220]
             }
         });
-        let out = extract_palette_bytes(&rgba, size, 3, 13).unwrap();
-        assert_eq!(out.len(), 9);
-        // Each centroid should be dominated by one primary.
+        let out = extract_palette_bytes(&rgba, size, 4, 13).unwrap();
+        assert_eq!(out.len(), 12);
         let colors: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        assert_eq!(
+            colors[0], CREAM_SRGB,
+            "slot 0 must be cream: {:?}",
+            colors[0]
+        );
         let mut has_red = false;
         let mut has_green = false;
         let mut has_blue = false;
-        for c in &colors {
-            if c[0] > 150 && c[1] < 80 && c[2] < 80 {
+        for c in &colors[1..] {
+            if c[0] > 150 && c[1] < 100 && c[2] < 100 {
                 has_red = true;
             }
-            if c[1] > 150 && c[0] < 80 && c[2] < 80 {
+            if c[1] > 150 && c[0] < 100 && c[2] < 100 {
                 has_green = true;
             }
-            if c[2] > 150 && c[0] < 80 && c[1] < 80 {
+            if c[2] > 150 && c[0] < 100 && c[1] < 100 {
                 has_blue = true;
             }
         }
         assert!(
             has_red && has_green && has_blue,
             "missing a primary: {colors:?}"
+        );
+    }
+
+    #[test]
+    fn cream_is_always_slot_zero() {
+        // Even on a warm-toned image the auto palette must begin with
+        // cream so the solver always has a luminance carrier.
+        let rgba = rgb_image(64, |_, _| [150, 60, 40]);
+        let out = extract_palette_bytes(&rgba, 64, 3, 42).unwrap();
+        assert_eq!(out.len(), 9);
+        assert_eq!(&out[..3], &CREAM_SRGB[..]);
+    }
+
+    #[test]
+    fn hue_slots_are_saturation_boosted() {
+        // A dim brown image would previously return dim brown threads;
+        // after the boost each hue slot should have its strongest channel
+        // well above the raw image value.
+        let rgba = rgb_image(64, |_, _| [60, 30, 15]); // dark warm brown
+        let out = extract_palette_bytes(&rgba, 64, 2, 1).unwrap();
+        let hue = &out[3..6];
+        let max_channel = *hue.iter().max().unwrap();
+        assert!(
+            max_channel > 180,
+            "hue slot not boosted, max channel = {max_channel}",
         );
     }
 
