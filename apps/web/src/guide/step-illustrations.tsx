@@ -460,29 +460,24 @@ export function WeaveArt() {
   );
 }
 
-/** Step 5: continuous thread entering from the top, wrapping nail 1 with a
- *  visible hook-loop on its LEFT, crossing between the nails, then wrapping
- *  nail 2 with a hook-loop on its RIGHT, exiting back to the top. Matches
- *  the hand-sketched reference: two tails at top, loops bulging out on the
- *  opposite outer sides of each nail. */
+/** Step 5: continuous thread, asymmetric by design.
+ *  Nail 1: clean CCW arc wrap on the LEFT side, no self-crossing.
+ *  Nail 2: the thread runs past the top-right of the nail, loops CW around
+ *  the right and under, then exits up-right from the lower-left of the
+ *  nail — the entry and exit segments cross each other at the top-left. */
 export function WrapArt() {
   const R = 4.5;
-  const n1 = { x: 70, y: 82 };
-  const n2 = { x: 110, y: 82 };
+  const n1 = { x: 72, y: 84 };
+  const n2 = { x: 112, y: 82 };
 
-  // One continuous stroke. Bezier controls tuned so each hook visibly
-  // bulges past the outer edge of its nail.
   const d = `
-    M 62 14
-    Q 62 46 ${n1.x - 1} ${n1.y - R - 1}
-    C ${n1.x - R - 16} ${n1.y - 3}
-      ${n1.x - R - 14} ${n1.y + R + 12}
-      ${n1.x + 2} ${n1.y + R + 5}
-    Q ${(n1.x + n2.x) / 2} ${n1.y + R + 11} ${n2.x - 2} ${n2.y + R + 5}
-    C ${n2.x + R + 14} ${n2.y + R + 12}
-      ${n2.x + R + 16} ${n2.y - 3}
-      ${n2.x + 1} ${n2.y - R - 1}
-    Q ${W - 62} 46 ${W - 62} 14
+    M 58 14
+    Q 60 42 64 72
+    A 13 13 0 1 0 80 94
+    Q 94 98 100 92
+    L 123 73
+    A 14 14 0 1 1 102 92
+    L 140 14
   `;
 
   return (
@@ -505,8 +500,8 @@ export function WrapArt() {
       ))}
 
       {/* Accent dots on the outer side of each hook */}
-      <circle cx={n1.x - R - 10} cy={n1.y + 4} r="1.9" fill={ACCENT} />
-      <circle cx={n2.x + R + 10} cy={n2.y + 4} r="1.9" fill={ACCENT} />
+      <circle cx={n1.x - R - 7} cy={n1.y + 3} r="1.8" fill={ACCENT} />
+      <circle cx={n2.x + R + 12} cy={n2.y + 3} r="1.8" fill={ACCENT} />
 
       {/* Labels */}
       <text
