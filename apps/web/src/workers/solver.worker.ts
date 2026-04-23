@@ -127,6 +127,27 @@ const api: SolverWorkerApi = {
     return Comlink.transfer(copy, [copy.buffer]);
   },
 
+  async paletteExplanatoryShares(
+    rgba: Uint8Array,
+    size: number,
+    paletteSrgb: Uint8Array,
+    face: { x: number; y: number; w: number; h: number } | null,
+  ): Promise<Float32Array> {
+    const solver = await getSolver();
+    const shares = solver.paletteExplanatoryShares(
+      rgba,
+      size,
+      paletteSrgb,
+      face?.x ?? 0,
+      face?.y ?? 0,
+      face?.w ?? 0,
+      face?.h ?? 0,
+    );
+    const copy = new Float32Array(shares.length);
+    copy.set(shares);
+    return Comlink.transfer(copy, [copy.buffer]);
+  },
+
   async preprocess(
     rgba: Uint8Array,
     size: number,

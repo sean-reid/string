@@ -168,30 +168,72 @@ export function deriveSolverParams(
 }
 
 /**
- * Allocate per-color line budgets so no single color monopolizes the
- * solve. The shadow anchor (slot 0, typically black) gets a larger
- * share since it drives luminance contrast; chromatic slots split
- * the remainder evenly. `0` entries mean uncapped — used for
- * single-color palettes so the solver behaves identically to the
- * legacy mono path.
+ * Minimum fraction of the line budget any single color is allowed to
+ * receive, regardless of its explanatory share. Prevents a near-zero
+ * share color (e.g. a pale yellow highlight on a darker image) from
+ * being starved to literally zero lines. `0.05` leaves enough room
+ * for five balanced colors and still protects the weakest.
+ */
+export const COLOR_BUDGET_FLOOR = 0.05;
+
+/**
+ * Derive per-color line budgets from image-aware explanatory shares.
+ * `shares` is the WASM-computed fraction of gamut each palette slot
+ * explains (summing to 1.0). We apply `COLOR_BUDGET_FLOOR` as a
+ * minimum per-color share, renormalize, and convert to integer chord
+ * counts summing to `lineBudget`.
+ *
+ * Falls back to an even split when `shares` is empty or malformed —
+ * preserves legacy behavior for callers that haven't wired up the
+ * image-aware path yet.
+ *
+ * `0` entries mean unbudgeted; only used when palette size is 1.
  */
 export function deriveColorBudgets(
   palette: readonly string[],
   lineBudget: number,
+  shares?: Float32Array | readonly number[],
 ): Uint32Array {
   if (palette.length <= 1) {
     return new Uint32Array();
   }
-  const total = Math.max(lineBudget, palette.length);
-  const shadowShare = 0.4;
-  const shadow = Math.round(total * shadowShare);
-  const remaining = Math.max(total - shadow, palette.length - 1);
-  const perChromatic = Math.floor(remaining / (palette.length - 1));
-  const budgets = new Uint32Array(palette.length);
-  budgets[0] = shadow;
-  for (let i = 1; i < palette.length; i += 1) {
-    budgets[i] = perChromatic;
+  const n = palette.length;
+  const total = Math.max(lineBudget, n);
+
+  let weights: number[];
+  if (shares && shares.length === n) {
+    // Apply floor, then normalize to sum 1.
+    const floored = Array.from(shares, (s) => Math.max(s, COLOR_BUDGET_FLOOR));
+    const sum = floored.reduce((a, b) => a + b, 0);
+    weights = sum > 0 ? floored.map((w) => w / sum) : Array(n).fill(1 / n);
+  } else {
+    // Legacy fallback: 40% shadow anchor, even split across the rest.
+    weights = Array(n).fill(0);
+    weights[0] = 0.4;
+    const perChrom = 0.6 / (n - 1);
+    for (let i = 1; i < n; i += 1) weights[i] = perChrom;
   }
+
+  // Integer allocation via largest-remainder so the budgets sum
+  // exactly to `total`.
+  const raw = weights.map((w) => w * total);
+  const floor = raw.map((r) => Math.floor(r));
+  let allocated = floor.reduce((a, b) => a + b, 0);
+  const remainders = raw
+    .map((r, i) => ({ i, frac: r - Math.floor(r) }))
+    .sort((a, b) => b.frac - a.frac);
+  let idx = 0;
+  while (allocated < total && idx < remainders.length) {
+    const entry = remainders[idx];
+    if (entry) {
+      floor[entry.i] = (floor[entry.i] ?? 0) + 1;
+      allocated += 1;
+    }
+    idx += 1;
+  }
+
+  const budgets = new Uint32Array(n);
+  for (let i = 0; i < n; i += 1) budgets[i] = floor[i] ?? 0;
   return budgets;
 }
 

@@ -233,6 +233,94 @@ pub fn extract_palette_bytes(
     Ok(out)
 }
 
+/// Per-color explanatory share of the image's gamut.
+///
+/// Each saliency-weighted sample is assigned softly to the palette
+/// entries it's perceptually closest to, using an OKLab-distance
+/// softmax with temperature `SHARE_SOFTMAX_TEMPERATURE`. A color's
+/// share is the fraction of saliency-weighted mass that falls to
+/// it across the whole image. Returned shares sum to 1.0.
+///
+/// Perceptual distance (OKLab) rather than linear-RGB projection is
+/// the right signal here: a red pixel projects almost as well onto
+/// black's darkening basis as onto red's (black can darken any
+/// channel), but perceptually it's far closer to a red thread. The
+/// budget derivation we feed these shares into is a preference
+/// signal for the solver, not a physical deposit calculation.
+///
+/// This is the image-aware input to per-color budget allocation:
+/// a red-heavy portrait yields a large red share, a near-greyscale
+/// landscape yields shares dominated by black. The UI then applies
+/// a minimum floor + normalization before feeding the shares into
+/// `SolverConfig.color_budgets` so no color starves to zero.
+pub fn palette_explanatory_shares(
+    rgba: &[u8],
+    size: usize,
+    palette_srgb: &[u8],
+    face: Option<FaceBox>,
+) -> Result<Vec<f32>, &'static str> {
+    if rgba.len() != size * size * 4 {
+        return Err("rgba length must equal width * height * 4");
+    }
+    #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+    let bad_len = palette_srgb.len() % 3 != 0;
+    if bad_len || palette_srgb.is_empty() {
+        return Err("palette must be a non-empty multiple of 3 bytes (rgb)");
+    }
+    let n = palette_srgb.len() / 3;
+
+    let palette_oklab: Vec<[f32; 3]> = palette_srgb
+        .chunks_exact(3)
+        .map(|c| linear_to_oklab(srgb_bytes_to_linear([c[0], c[1], c[2]])))
+        .collect();
+
+    let samples = sample_with_saliency(rgba, size, face);
+    if samples.is_empty() {
+        return Ok(vec![1.0 / n as f32; n]);
+    }
+
+    let mut shares = vec![0.0f32; n];
+    for s in &samples {
+        let distances: Vec<f32> = palette_oklab
+            .iter()
+            .map(|p| oklab_distance(&s.oklab, p))
+            .collect();
+        let min_d = distances.iter().copied().fold(f32::INFINITY, f32::min);
+        let mut exps = vec![0.0f32; n];
+        let mut sum = 0.0f32;
+        for (k, d) in distances.iter().enumerate() {
+            let e = (-(d - min_d) / SHARE_SOFTMAX_TEMPERATURE).exp();
+            exps[k] = e;
+            sum += e;
+        }
+        if sum <= 1e-6 {
+            continue;
+        }
+        let inv = s.weight / sum;
+        for (k, e) in exps.iter().enumerate() {
+            shares[k] += e * inv;
+        }
+    }
+
+    let total: f32 = shares.iter().sum();
+    if total <= 1e-6 {
+        return Ok(vec![1.0 / n as f32; n]);
+    }
+    for s in &mut shares {
+        *s /= total;
+    }
+    Ok(shares)
+}
+
+/// OKLab-distance softmax temperature used by
+/// `palette_explanatory_shares`. Lower values sharpen assignment
+/// toward the nearest palette entry; higher values spread each
+/// pixel's mass more uniformly. `0.08` sits roughly between the
+/// intra-swatch distance (~0.02) and inter-palette distance
+/// (~0.15–0.30), so each pixel picks one clear winner while a
+/// meaningfully close runner-up still gets non-trivial share.
+const SHARE_SOFTMAX_TEMPERATURE: f32 = 0.08;
+
 /// Given an image and an existing partial palette, return the single
 /// best new color (sRGB bytes) to maximize gamut coverage. The
 /// heuristic: for each canonical primary, score how much it reduces
@@ -1033,6 +1121,62 @@ mod tests {
                 "palette entry {c:?} is too close to board luminance ({lum} > {cap})",
             );
         }
+    }
+
+    #[test]
+    fn explanatory_shares_follow_image_dominance() {
+        // Two-thirds red, one-third blue image with a palette of
+        // black / red / blue. Red's explanatory share should clearly
+        // dominate blue's, and all three must sum to ~1.
+        let size = 96;
+        let rgba = rgb_image(size, |x, _| {
+            if x < 2 * size / 3 {
+                [210, 30, 30]
+            } else {
+                [30, 30, 210]
+            }
+        });
+        let palette: &[u8] = &[0x11, 0x11, 0x11, 0xc0, 0x20, 0x20, 0x20, 0x20, 0xc0];
+        let shares = palette_explanatory_shares(&rgba, size, palette, None).unwrap();
+        assert_eq!(shares.len(), 3);
+        let sum: f32 = shares.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-3,
+            "shares should sum to 1, got {sum}"
+        );
+        assert!(
+            shares[1] > shares[2] * 1.5,
+            "red should dominate blue on a 2/3 red image: red={}, blue={}",
+            shares[1],
+            shares[2]
+        );
+    }
+
+    #[test]
+    fn explanatory_shares_with_only_one_explanatory_color() {
+        // A single-chromatic-region image with a palette where only
+        // one color can actually darken the region; the near-board
+        // slot has near-zero basis and should get a small share.
+        let size = 64;
+        let rgba = rgb_image(size, |_, _| [200, 40, 40]);
+        let palette: &[u8] = &[0xc0, 0x30, 0x30, 0xee, 0xe6, 0xd8];
+        let shares = palette_explanatory_shares(&rgba, size, palette, None).unwrap();
+        assert!(
+            shares[0] > 0.8,
+            "the single explanatory color should own most of the share, got {}",
+            shares[0]
+        );
+    }
+
+    #[test]
+    fn explanatory_shares_rejects_bad_inputs() {
+        let rgba = rgb_image(32, |_, _| [0, 0, 0]);
+        assert!(palette_explanatory_shares(&rgba, 32, &[], None).is_err());
+        // 2-byte palette isn't a multiple of 3.
+        assert!(palette_explanatory_shares(&rgba, 32, &[0, 0], None).is_err());
+        // Wrong image size.
+        let tiny = vec![0u8; 4];
+        assert!(palette_explanatory_shares(&tiny, 2, &[0, 0, 0], None).is_err());
     }
 
     #[test]

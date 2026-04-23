@@ -205,15 +205,35 @@ const baseStoreFactory = (
         }
       }
       const face = image.meta.faceBox;
+      const paletteBytes = paletteToSrgbBytes(palette);
+      let shares: Float32Array | undefined;
+      if (inColorMode) {
+        // Image-aware per-color budget: ask the solver for each
+        // palette slot's explanatory share of the image, then floor +
+        // renormalize on the TS side before feeding as soft budgets.
+        // Falls back silently to an even split if the call rejects
+        // (e.g. worker hiccup) — the solver handles even splits fine.
+        try {
+          shares = await remote.paletteExplanatoryShares(
+            processed,
+            image.meta.size,
+            paletteBytes,
+            face ?? null,
+          );
+        } catch {
+          shares = undefined;
+        }
+        if (get().generationId !== generationId) return;
+      }
       const extras: SolverInitExtras = {
         faceX: face?.x ?? 0,
         faceY: face?.y ?? 0,
         faceW: face?.w ?? 0,
         faceH: face?.h ?? 0,
         faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
-        paletteSrgb: paletteToSrgbBytes(palette),
+        paletteSrgb: paletteBytes,
         colorBudgets: inColorMode
-          ? deriveColorBudgets(palette, raw.line_budget)
+          ? deriveColorBudgets(palette, raw.line_budget, shares)
           : undefined,
       };
       const init = await remote.init(

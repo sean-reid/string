@@ -77,6 +77,16 @@ export interface SolverWorkerApi {
     existingSrgb: Uint8Array,
     face: { x: number; y: number; w: number; h: number } | null,
   ): Promise<Uint8Array>;
+  /** Per-color explanatory share (summing to 1.0) of the image given
+   *  `paletteSrgb`. Used to allocate image-aware line budgets: a
+   *  red-heavy portrait returns a high red share, so red gets a
+   *  larger slice of the line budget than an even split would give. */
+  paletteExplanatoryShares(
+    rgba: Uint8Array,
+    size: number,
+    paletteSrgb: Uint8Array,
+    face: { x: number; y: number; w: number; h: number } | null,
+  ): Promise<Float32Array>;
   /** Run the preprocessing pipeline. `grayscale=true` collapses to luminance
    *  (R=G=B); `grayscale=false` preserves chroma per channel. */
   preprocess(

@@ -100,13 +100,16 @@ pub struct SolverConfig {
     /// approaches rigidly sequential per-color builds. Mono ignores
     /// this.
     pub switch_cost_factor: f32,
-    /// Per-color line caps, indexed by palette slot. `0` means
-    /// uncapped for that color. The scorer applies a soft
-    /// diminishing-returns multiplier as a color approaches its cap
-    /// and hard-excludes colors that have reached it, preventing
-    /// black from monopolizing dark portraits. Entries past the
-    /// palette length are ignored; a config with all zeros reverts
-    /// to the legacy unrestricted behavior.
+    /// Per-color line budgets, indexed by palette slot. `0` means
+    /// unbudgeted for that color. Budgets are soft: the scorer applies
+    /// a diminishing-returns multiplier in the last 20 % of a color's
+    /// budget and keeps shrinking it past the budget down to
+    /// `BUDGET_EXHAUSTED_MULT`, so a color can still be chosen when
+    /// it's the only thing that closes residual. This replaces the
+    /// earlier hard cap — budgets now shape the distribution rather
+    /// than bound it. Entries past the palette length are ignored;
+    /// a config with all zeros reverts to the legacy unrestricted
+    /// behavior.
     pub color_budgets: [u32; MAX_PALETTE_FOR_BUDGETS],
 }
 
@@ -127,9 +130,17 @@ impl Default for SolverConfig {
 }
 
 /// Fraction of a color's budget below which the soft
-/// diminishing-returns ramp kicks in. Above this, no penalty; at the
-/// cap, the multiplier is zero.
+/// diminishing-returns ramp kicks in. Above this, no penalty; at
+/// the budget boundary, the multiplier equals `BUDGET_EXHAUSTED_MULT`.
 const BUDGET_SOFT_HEADROOM: f32 = 0.2;
+
+/// Floor multiplier applied once a color's usage is at or past its
+/// budget. Keeps the color weakly eligible so a color that has
+/// genuinely unique coverage (e.g. the only warm thread on a
+/// sunset) can still be picked when the budget under-allocated it.
+/// The PR2 hard cap sat at 0.0; raising this to ~0.1 turns budgets
+/// into soft preferences rather than strict caps.
+const BUDGET_EXHAUSTED_MULT: f32 = 0.1;
 
 /// Mode-specific solver state. Mono keeps its legacy scalar
 /// luminance residual; Color uses a 3-channel linear-RGB target +
@@ -387,31 +398,35 @@ impl Solver {
     }
 
     /// Soft budget multiplier for color `k`: `1.0` until a color has
-    /// consumed `(1 - BUDGET_SOFT_HEADROOM)` of its cap, then ramps
-    /// linearly down to zero at the cap. `0` cap entries mean
-    /// uncapped (always return `1.0`). Colors at or past their cap
-    /// return `0.0` so the scorer can cheaply hard-exclude them.
+    /// consumed `(1 - BUDGET_SOFT_HEADROOM)` of its budget, then ramps
+    /// down to `BUDGET_EXHAUSTED_MULT` at the budget boundary and
+    /// stays there past exhaustion. `0` budget entries mean
+    /// unbudgeted (always return `1.0`). The floor past exhaustion
+    /// keeps uniquely-explanatory colors selectable instead of
+    /// hard-gating them like the original PR 2 cap did.
     fn budget_multiplier(&self, color_index: usize) -> f32 {
-        let cap = self
+        let budget = self
             .config
             .color_budgets
             .get(color_index)
             .copied()
             .unwrap_or(0);
-        if cap == 0 {
+        if budget == 0 {
             return 1.0;
         }
         let used = self.color_usage.get(color_index).copied().unwrap_or(0);
-        if used >= cap {
-            return 0.0;
+        if used >= budget {
+            return BUDGET_EXHAUSTED_MULT;
         }
-        let soft_start = (cap as f32) * (1.0 - BUDGET_SOFT_HEADROOM);
+        let soft_start = (budget as f32) * (1.0 - BUDGET_SOFT_HEADROOM);
         if (used as f32) <= soft_start {
             return 1.0;
         }
-        let remaining = (cap - used) as f32;
-        let headroom = (cap as f32) * BUDGET_SOFT_HEADROOM;
-        (remaining / headroom).clamp(0.0, 1.0)
+        let remaining = (budget - used) as f32;
+        let headroom = (budget as f32) * BUDGET_SOFT_HEADROOM;
+        // Ramp 1.0 → BUDGET_EXHAUSTED_MULT across the soft band.
+        let t = (remaining / headroom).clamp(0.0, 1.0);
+        BUDGET_EXHAUSTED_MULT + (1.0 - BUDGET_EXHAUSTED_MULT) * t
     }
 
     /// Color chord candidates, scored jointly over `(pin, color)`.
@@ -1136,10 +1151,12 @@ mod tests {
     }
 
     #[test]
-    fn color_budget_caps_per_color_line_count() {
-        // Apply a cap of 40 chords to color 0 (red) on a three-panel
-        // image. The cap must be respected, and the remaining budget
-        // should flow to the other colors.
+    fn color_budget_steers_allocation_toward_uncapped_colors() {
+        // Soft-cap semantics (PR 8): a low budget on color 0 should
+        // bias the allocation toward the uncapped colors without
+        // hard-gating red out. Red may slightly overshoot its budget
+        // if it's still the best local fit, but the bulk of lines
+        // must flow elsewhere.
         let size = 96usize;
         let rgba = three_panel_rgba(size);
         let palette = Palette::from_srgb_bytes(&[255, 0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
@@ -1163,20 +1180,77 @@ mod tests {
                 counts[c as usize] += 1;
             }
         }
+        // Red should stay in the neighbourhood of its soft budget —
+        // overshoot allowed but bounded. Without budgets red would
+        // get ~100 lines on this image, so an upper bound well below
+        // that confirms the soft penalty bit.
         assert!(
-            counts[0] <= 40,
-            "red should respect its 40-line cap, got {}",
+            counts[0] <= 70,
+            "red soft-budget overshoot too large: got {} (budget=40)",
             counts[0]
         );
         assert!(
             counts[0] > 0,
-            "red should not be starved before reaching its cap"
+            "red should not be starved before reaching its soft budget"
         );
         assert!(
-            counts[1] + counts[2] >= 250,
+            counts[1] + counts[2] >= 230,
             "remaining budget should flow to uncapped colors: green={}, blue={}",
             counts[1],
             counts[2]
+        );
+    }
+
+    #[test]
+    fn soft_cap_lets_exhausted_color_continue_when_only_option() {
+        // Two-color palette where red is the only color that can
+        // meaningfully close residual on a red panel. Give red a
+        // tiny soft budget. Under the old hard cap red would stop
+        // dead at 10; under soft-cap it should exceed — there's no
+        // alternative.
+        let size = 64usize;
+        let rgba = {
+            let mut v = vec![0u8; size * size * 4];
+            for y in 0..size {
+                for x in 0..size {
+                    let base = (y * size + x) * 4;
+                    v[base] = 210;
+                    v[base + 1] = 40;
+                    v[base + 2] = 40;
+                    v[base + 3] = 255;
+                }
+            }
+            v
+        };
+        // Two colors: red (slot 0, soft-budgeted) and a near-board
+        // cream (slot 1, can barely darken). Red is the only useful
+        // thread.
+        let palette = Palette::from_srgb_bytes(&[0xc0, 0x30, 0x30, 0xee, 0xe6, 0xd8]).unwrap();
+        let mut budgets = [0u32; MAX_PALETTE_FOR_BUDGETS];
+        budgets[0] = 10;
+        let config = SolverConfig {
+            pin_count: 64,
+            line_budget: 80,
+            min_chord_skip: 4,
+            color_budgets: budgets,
+            ..Default::default()
+        };
+        let mut s = Solver::new(&rgba, size, config, palette, 11, None, 0.0).unwrap();
+        let mut red = 0u32;
+        while !s.is_done() {
+            let batch = s.step_many(20);
+            if batch.is_empty() {
+                break;
+            }
+            for &c in s.last_batch_colors().iter() {
+                if c == 0 {
+                    red += 1;
+                }
+            }
+        }
+        assert!(
+            red > 10,
+            "soft cap should let red exceed its budget when it's the only explanatory color (got {red})"
         );
     }
 }

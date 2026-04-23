@@ -71,6 +71,33 @@ pub fn suggest_next_color(
         .map_err(JsValue::from_str)
 }
 
+/// Per-color explanatory share of the image's gamut under the given
+/// palette. Length equals the palette size; values sum to 1.0. The
+/// UI uses these shares to allocate soft per-color line budgets.
+#[wasm_bindgen(js_name = paletteExplanatoryShares)]
+pub fn palette_explanatory_shares(
+    rgba: &[u8],
+    size: u32,
+    palette_srgb: &[u8],
+    face_x: f32,
+    face_y: f32,
+    face_w: f32,
+    face_h: f32,
+) -> Result<Vec<f32>, JsValue> {
+    let face = if face_w > 0.0 && face_h > 0.0 {
+        Some(FaceBox {
+            x: face_x,
+            y: face_y,
+            w: face_w,
+            h: face_h,
+        })
+    } else {
+        None
+    };
+    palette_extract::palette_explanatory_shares(rgba, size as usize, palette_srgb, face)
+        .map_err(JsValue::from_str)
+}
+
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
 pub fn version() -> String {
