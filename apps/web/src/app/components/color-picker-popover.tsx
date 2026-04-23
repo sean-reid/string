@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { parseHexColor } from "@/solver/physics";
 
 interface ColorPickerPopoverProps {
   value: string;
@@ -6,7 +7,8 @@ interface ColorPickerPopoverProps {
   onClose: () => void;
   /** Pre-curated thread colors shown as quick-pick chips. */
   presets?: string[];
-  /** Anchor element used to position the popover. */
+  /** Anchor element used to position the popover and decide when a
+   *  pointer-outside event should dismiss it. */
   anchor: HTMLElement | null;
 }
 
@@ -26,6 +28,12 @@ const DEFAULT_PRESETS = [
   "#a81c88",
 ];
 
+interface Hsv {
+  h: number;
+  s: number;
+  v: number;
+}
+
 function clampHex(hex: string): string {
   const trimmed = hex.trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(trimmed)) return trimmed;
@@ -37,11 +45,69 @@ function clampHex(hex: string): string {
   return "";
 }
 
+function hexToHsv(hex: string): Hsv {
+  const rgb = parseHexColor(hex);
+  if (!rgb) return { h: 0, s: 0, v: 0 };
+  const r = rgb[0] / 255;
+  const g = rgb[1] / 255;
+  const b = rgb[2] / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  const v = max;
+  const s = max === 0 ? 0 : delta / max;
+  let h = 0;
+  if (delta !== 0) {
+    if (max === r) h = ((g - b) / delta) % 6;
+    else if (max === g) h = (b - r) / delta + 2;
+    else h = (r - g) / delta + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s, v };
+}
+
+function hsvToHex({ h, s, v }: Hsv): string {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) {
+    r = c;
+    g = x;
+  } else if (h < 120) {
+    r = x;
+    g = c;
+  } else if (h < 180) {
+    g = c;
+    b = x;
+  } else if (h < 240) {
+    g = x;
+    b = c;
+  } else if (h < 300) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+  const toHex = (n: number) => Math.round((n + m) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 /**
- * Stylized color picker: a live preview, hex input, native
- * eyedropper/color control for fine picks, and a row of Vrellis-
- * style preset chips. Positioned absolutely over its anchor; closes
- * on outside click or Escape.
+ * Stylized color picker tailored to the app's design system: no
+ * native browser controls, every surface and border uses the same
+ * paper / surface / line / ink / muted tokens the rest of the app
+ * uses. HSV model — saturation / value square stacked over a hue
+ * bar — plus a hex input and a row of Vrellis-style thread presets.
+ *
+ * Positioning: anchored below its parent at `left: 0`; after mount
+ * we measure and apply a horizontal translation so the popover stays
+ * inside the viewport even when the anchor is near the right edge.
+ * Closes on outside pointer or Escape.
  */
 export function ColorPickerPopover({
   value,
@@ -51,10 +117,15 @@ export function ColorPickerPopover({
   anchor,
 }: ColorPickerPopoverProps) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  const svRef = useRef<HTMLDivElement | null>(null);
+  const hueRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState(value);
+  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(value));
+  const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     setDraft(value);
+    setHsv(hexToHsv(value));
   }, [value]);
 
   useEffect(() => {
@@ -79,49 +150,173 @@ export function ColorPickerPopover({
     };
   }, [onClose, anchor]);
 
-  const commit = (next: string) => {
+  // Position the popover using `fixed` coordinates derived from the
+  // anchor's bounding rect. `fixed` takes the popover out of the
+  // document flow entirely so it can't extend ancestor widths and
+  // trigger a horizontal scrollbar, no matter where the anchor sits.
+  // `documentElement.clientWidth` excludes the vertical scrollbar,
+  // giving us the true usable viewport width.
+  useLayoutEffect(() => {
+    if (!anchor) return;
+    const measure = () => {
+      const anchorRect = anchor.getBoundingClientRect();
+      const popoverWidth = popoverRef.current?.offsetWidth ?? 256;
+      const margin = 12;
+      const viewportWidth =
+        document.documentElement.clientWidth || window.innerWidth;
+      const minLeft = margin;
+      const maxLeft = viewportWidth - popoverWidth - margin;
+      let left = anchorRect.left;
+      if (left > maxLeft) left = maxLeft;
+      if (left < minLeft) left = minLeft;
+      const top = anchorRect.bottom + 6;
+      setPlacement({ top, left });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [anchor]);
+
+  const commitHex = (next: string) => {
     const normalized = clampHex(next);
     if (!normalized) return;
     setDraft(normalized);
+    setHsv(hexToHsv(normalized));
     onChange(normalized);
   };
+
+  const commitHsv = (patch: Partial<Hsv>) => {
+    const merged = { ...hsv, ...patch };
+    const hex = hsvToHex(merged);
+    setHsv(merged);
+    setDraft(hex);
+    onChange(hex);
+  };
+
+  const svFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = svRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    const s = Math.min(1, Math.max(0, x));
+    const v = Math.min(1, Math.max(0, 1 - y));
+    commitHsv({ s, v });
+  };
+
+  const hueFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = hueRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const h = Math.min(360, Math.max(0, x * 360));
+    commitHsv({ h });
+  };
+
+  const pureHue = `hsl(${Math.round(hsv.h)}, 100%, 50%)`;
+  const current = clampHex(draft) || value;
 
   return (
     <div
       ref={popoverRef}
       role="dialog"
       aria-label="Edit swatch color"
-      className="absolute left-0 top-[calc(100%+6px)] z-20 flex w-64 flex-col gap-3 rounded-md border border-line bg-paper p-3 shadow-lg"
+      className="fixed z-50 flex w-64 flex-col gap-3 rounded-md border border-line bg-paper p-3 shadow-lg"
+      style={{
+        top: placement?.top ?? 0,
+        left: placement?.left ?? 0,
+        visibility: placement ? "visible" : "hidden",
+      }}
     >
       <div className="flex items-center gap-2">
         <span
           aria-hidden
           className="h-8 w-8 shrink-0 rounded border border-line"
-          style={{ backgroundColor: draft || value }}
-        />
-        <input
-          type="color"
-          aria-label="Pick exact color"
-          value={draft || value}
-          onChange={(e) => commit(e.target.value)}
-          className="h-8 w-10 cursor-pointer rounded border border-line bg-surface p-0.5"
+          style={{ backgroundColor: current }}
         />
         <input
           type="text"
           aria-label="Hex color"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => commit(draft)}
+          onBlur={() => commitHex(draft)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              commit(draft);
+              commitHex(draft);
             }
           }}
           spellCheck={false}
           className="w-full min-w-0 rounded border border-line bg-surface px-2 py-1 font-mono text-xs tabular-nums focus-visible:border-ink focus-visible:outline-none"
         />
       </div>
+
+      <div
+        ref={svRef}
+        role="slider"
+        aria-label="Saturation and value"
+        aria-valuenow={Math.round(hsv.s * 100)}
+        tabIndex={0}
+        className="relative h-32 w-full cursor-crosshair overflow-hidden rounded border border-line"
+        style={{
+          backgroundColor: pureHue,
+          backgroundImage:
+            "linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)), linear-gradient(to right, rgba(255,255,255,1), rgba(255,255,255,0))",
+        }}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          svFromPointer(e);
+        }}
+        onPointerMove={(e) => {
+          if ((e.buttons & 1) === 1) svFromPointer(e);
+        }}
+      >
+        <span
+          aria-hidden
+          className="pointer-events-none absolute block h-3 w-3 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+          style={{
+            left: `${hsv.s * 100}%`,
+            top: `${(1 - hsv.v) * 100}%`,
+            transform: "translate(-50%, -50%)",
+            backgroundColor: current,
+          }}
+        />
+      </div>
+
+      <div
+        ref={hueRef}
+        role="slider"
+        aria-label="Hue"
+        aria-valuenow={Math.round(hsv.h)}
+        tabIndex={0}
+        className="relative h-4 w-full cursor-ew-resize rounded border border-line"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",
+        }}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          hueFromPointer(e);
+        }}
+        onPointerMove={(e) => {
+          if ((e.buttons & 1) === 1) hueFromPointer(e);
+        }}
+      >
+        <span
+          aria-hidden
+          className="pointer-events-none absolute top-1/2 block h-5 w-2 rounded border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+          style={{
+            left: `${(hsv.h / 360) * 100}%`,
+            transform: "translate(-50%, -50%)",
+            backgroundColor: pureHue,
+          }}
+        />
+      </div>
+
       <div>
         <p className="mb-1.5 text-[11px] uppercase tracking-wide text-muted">
           Thread presets
@@ -135,7 +330,7 @@ export function ColorPickerPopover({
                 type="button"
                 aria-label={`Preset ${p}`}
                 aria-pressed={selected}
-                onClick={() => commit(p)}
+                onClick={() => commitHex(p)}
                 className={[
                   "h-6 w-full rounded border transition",
                   selected ? "border-ink" : "border-line hover:border-ink",
