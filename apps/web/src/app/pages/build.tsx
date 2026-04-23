@@ -131,14 +131,21 @@ export function BuildPage() {
         </p>
         <div
           className="mt-1 flex items-center gap-2 font-mono text-xs text-muted"
-          aria-label="Thread color"
+          aria-label="Thread colors"
         >
-          <span
-            aria-hidden="true"
-            className="inline-block h-3 w-3 rounded-full border border-line"
-            style={{ backgroundColor: palette[0] ?? "#141311" }}
-          />
-          <span>black thread on cream board</span>
+          {palette.map((hex, i) => (
+            <span
+              key={`${i}-${hex}`}
+              aria-hidden="true"
+              className="inline-block h-3 w-3 rounded-full border border-line"
+              style={{ backgroundColor: hex }}
+            />
+          ))}
+          <span>
+            {palette.length === 1
+              ? "one thread on cream board"
+              : `${palette.length} threads on cream board`}
+          </span>
         </div>
       </header>
 

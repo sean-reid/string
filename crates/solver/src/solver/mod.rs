@@ -1114,8 +1114,7 @@ mod tests {
                 switch_cost_factor: factor,
                 ..Default::default()
             };
-            let mut s =
-                Solver::new(&rgba, size, config, palette.clone(), 21, None, 0.0).unwrap();
+            let mut s = Solver::new(&rgba, size, config, palette.clone(), 21, None, 0.0).unwrap();
             let mut colors = Vec::new();
             while !s.is_done() {
                 let batch = s.step_many(50);

@@ -225,9 +225,10 @@ pub struct Solver {
 
 #[wasm_bindgen]
 impl Solver {
-    /// `palette_srgb` is a flat buffer of sRGB bytes, length `N * 3`, one
-    /// thread color per entry. PR 2 only accepts `N == 1`; multi-color
-    /// palettes land in PR 3.
+    /// `palette_srgb` is a flat buffer of sRGB bytes, length `N * 3`,
+    /// one thread color per entry. `N == 1` runs the mono scalar
+    /// residual path; `N > 1` activates the 3-channel joint-greedy
+    /// color solver.
     #[wasm_bindgen(constructor)]
     pub fn new(
         preprocessed_rgba: &[u8],

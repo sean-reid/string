@@ -33,12 +33,10 @@ interface SolverState {
   physical: PhysicalParams;
   seed: bigint;
   sequence: number[];
-  /** Palette index per line in `sequence`. Always-zero in mono-only
-   *  mode; kept as a stored field for downstream exports that
-   *  serialize it regardless. */
+  /** Palette index per line in `sequence`. All zero in mono mode;
+   *  monotonic-ish in color mode (run-batched by switch cost). */
   sequenceColors: number[];
-  /** Mirror of `physical.palette` for exports and canvas rendering.
-   *  In mono-only mode this is always `[#111111]`. */
+  /** Mirror of `physical.palette` for exports and canvas rendering. */
   palette: string[];
   pinPositions: Float32Array | null;
   pinCount: number;
@@ -226,14 +224,14 @@ const baseStoreFactory = (
         extras,
       );
       if (get().generationId !== generationId) return;
-      // Note: do NOT write `palette` here. `store.palette` holds the
-      // image-derived suggestions populated before the solve; the
-      // user's chosen palette lives in `physical.palette` and doesn't
-      // need mirroring back into the store.
       set({
         pinPositions: init.pinPositions,
         pinCount: init.pinCount,
         lineBudget: init.lineBudget,
+        // Mirror the palette the solver ran with so the build guide
+        // and exports render with the same colors even after the
+        // user edits `physical.palette` post-solve.
+        palette: [...palette],
       });
 
       await runSolverLoop(get, generationId);

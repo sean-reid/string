@@ -86,11 +86,13 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   palette: [DEFAULT_THREAD_COLOR],
 };
 
-/// Target line budget when a user is building a color palette. Each
-/// color needs enough lines to emerge; the reference Vrellis-like
-/// color portrait uses ~5000 lines across ~4 colors. The live
-/// `physical.lineBudget` still takes precedence — this is the
-/// value we switch to when the user first unlocks color mode.
+/// Target line budget when a user first unlocks color mode. Each
+/// chromatic slot needs enough lines to emerge or it starves; the
+/// reference Vrellis-like color portrait uses ~5000 lines across
+/// ~4 colors. The store auto-bumps `physical.lineBudget` to this
+/// value on the first mono→color transition and reverts on the
+/// reverse transition — provided the user hasn't manually tuned
+/// the budget away from its default.
 export const DEFAULT_COLOR_LINE_BUDGET = 5000;
 
 /// Multiplicative score penalty applied to candidate (pin, color)

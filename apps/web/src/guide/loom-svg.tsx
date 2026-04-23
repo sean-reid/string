@@ -35,8 +35,10 @@ export function LoomSvg({
   currentStep,
 }: Props) {
   const upcomingColor = DEFAULT_ACCENT;
-  const paletteResolved =
-    palette && palette.length > 0 ? palette : [DEFAULT_THREAD];
+  const paletteResolved = useMemo(
+    () => (palette && palette.length > 0 ? palette : [DEFAULT_THREAD]),
+    [palette],
+  );
   const batches = useMemo(() => {
     if (!pinPositions || imageSize <= 0)
       return [] as Array<{ d: string; color: string }>;
