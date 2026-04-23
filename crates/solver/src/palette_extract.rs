@@ -1,71 +1,91 @@
-//! Palette extraction for a photo, tuned for **subtractive
-//! reconstruction** on a light board (Vrellis paradigm).
+//! Palette extraction tuned for **subtractive reconstruction** on a
+//! light board (Vrellis paradigm).
 //!
-//! The palette is NOT image-derived. It's a fixed vocabulary of
-//! saturated thread primaries — black, red, yellow, blue, cyan,
-//! magenta, green — matching what Vrellis (and most string-art
-//! builders) physically wind onto pins. Image-derived palettes on
-//! portraits return muddy skin-tone browns that all darken canvas
-//! toward the same warm-neutral; saturated primaries actually mix
-//! partitively (red + yellow = orange density in a region, etc.)
-//! the way classic halftone printing does.
+//! Two entry points:
 //!
-//! The extractor decides which N of the primaries best fit the
-//! image's content, not what specific RGB values to use:
+//! - `extract_palette_bytes` picks `k` thread colors that best cover
+//!   an image's gamut for color string-art reconstruction. Slot 0
+//!   is always near-black (the universal shadow anchor), slots 1..k
+//!   are data-driven chromatic centroids from saliency-weighted
+//!   OKLab k-means. Centroids with OKLab chroma below
+//!   `MUDDY_CHROMA_THRESHOLD` are rejected and the clustering re-
+//!   runs for a smaller k — browns, greys, and the "muddy middle"
+//!   collapse into a single warm-neutral wash on cream, so we
+//!   actively keep them out of the palette.
 //!
-//! 1. Rank primaries by how much of the image's `target − board`
-//!    residual they explain (dot product summed over pixels,
-//!    weighted by the residual magnitude).
-//! 2. Return the top-N in dark-to-light luminance order.
+//! - `suggest_next_color` returns a single new color that best
+//!   extends an existing partial palette's gamut coverage. Used by
+//!   the UI `[+]` button.
 //!
-//! Black is always included — it's the universal luminance
-//! darkener and every image needs it. k=1 is always just black.
-//! k=4 tends to fall on the canonical Vrellis set
-//! (black, red, yellow, blue) for natural portraits.
+//! Fallback: if k-means can't produce enough chromatic centroids
+//! (nearly greyscale images), we fall back to ranking a fixed
+//! vocabulary of saturated thread primaries — the same approach the
+//! pre-OKLab extractor used. That path is kept as
+//! `primary_fallback_palette` so regression tests still cover it.
 
 use crate::solver::palette::srgb_to_linear;
 use crate::solver::weight::FaceBox;
 
-const SAMPLE_DIM: usize = 128;
+const SAMPLE_DIM: usize = 96;
 const MAX_K: usize = 8;
 
+/// OKLab chroma below this value is treated as "muddy" — not a
+/// productive thread color on a cream substrate. Empirically
+/// calibrated: warm-neutral skin centroids from photos typically
+/// land around 0.03–0.05; saturated primaries sit at 0.1–0.3.
+const MUDDY_CHROMA_THRESHOLD: f32 = 0.045;
+
+/// Centroids brighter than `BOARD_LUMINANCE * BOARD_LIGHT_CAP_RATIO`
+/// are rejected — a thread lighter than the cream board can't darken
+/// the canvas. Without this cap, k-means on pale subjects (snow,
+/// high-key portraits) can happily return a "near-cream" centroid
+/// that the solver can never actually deposit.
+const BOARD_LIGHT_CAP_RATIO: f32 = 0.95;
+
+/// Linear-RGB Rec.709 luminance of the board. Mirrors
+/// `solver::mod::BOARD_LUMINANCE`.
+const BOARD_LUMINANCE: f32 =
+    0.2126 * BOARD_LINEAR[0] + 0.7152 * BOARD_LINEAR[1] + 0.0722 * BOARD_LINEAR[2];
+
+/// Minimum OKLab distance between two palette entries for them to be
+/// considered distinct. Used in `suggest_next_color` to skip colors
+/// that would duplicate what's already in the palette.
+const DUPLICATE_EPSILON: f32 = 0.06;
+
 /// sRGB of the default black thread. Mono mode (k=1) returns this
-/// verbatim — black on cream is the canonical Vrellis-style
-/// monochrome baseline.
+/// verbatim, and multi-color palettes anchor slot 0 here.
 const BLACK_SRGB: [u8; 3] = [0x11, 0x11, 0x11];
 
 /// Linear-RGB board color (cream #f4efe5). Must mirror
 /// `solver::mod::BOARD_LINEAR`.
 const BOARD_LINEAR: [f32; 3] = [0.904_587_8, 0.862_741_3, 0.784_452_6];
 
-/// Canonical thread-color vocabulary — the full set of saturated
-/// primaries the extractor ranks and picks from. These are all real
-/// embroidery/crochet thread colors, chosen to tile hue-space at
-/// roughly even intervals so a ranked top-N gives the palette that
-/// actually explains the image's gamut rather than always falling
-/// on the same six primaries. Dark-to-light luminance spread so
-/// the dark-first build order places deep shadows first.
+/// Canonical thread-color vocabulary — the fallback set the
+/// extractor falls back to when an image is too greyscale to yield
+/// chromatic k-means centroids, and the search space for
+/// `suggest_next_color`. These are real embroidery/crochet thread
+/// colors at roughly even intervals around hue space.
 const CANONICAL_PRIMARIES: &[[u8; 3]] = &[
-    // Achromatic / near-black anchor for shadow luminance.
-    [0x11, 0x11, 0x11], // black
-    // Warm half of the wheel.
+    [0x11, 0x11, 0x11], // near-black (shadow anchor; always slot 0)
     [0xb8, 0x1c, 0x1c], // saturated red
-    [0xd9, 0x5a, 0x1c], // orange (between red and yellow)
-    [0xd9, 0xa8, 0x1c], // saturated yellow (mustard-warm)
-    [0x8a, 0x3c, 0x2c], // brick / terracotta (warm shadow — hair, skin shadow)
-    [0xd9, 0x82, 0x82], // salmon / rose (soft warm — lips, cheek)
-    // Cool half of the wheel.
+    [0xd9, 0x5a, 0x1c], // orange
+    [0xd9, 0xa8, 0x1c], // saturated yellow
+    [0x8a, 0x3c, 0x2c], // brick / terracotta
+    [0xd9, 0x82, 0x82], // salmon / rose
     [0x1c, 0x88, 0x50], // deep green
-    [0x3c, 0x5a, 0x1c], // olive / sage (earthy green)
+    [0x3c, 0x5a, 0x1c], // olive / sage
     [0x1c, 0x88, 0xa8], // deep cyan
-    [0x1c, 0x70, 0x70], // teal (between cyan and green)
+    [0x1c, 0x70, 0x70], // teal
     [0x1c, 0x3c, 0xa8], // saturated blue
-    [0x5a, 0x1c, 0xa8], // purple (between blue and magenta)
+    [0x5a, 0x1c, 0xa8], // purple
     [0xa8, 0x1c, 0x88], // deep magenta
 ];
 
-/// Public entry point. Returns `k * 3` sRGB bytes of saturated thread
-/// primaries chosen to best explain the image's target distribution.
+/// Pick a palette of `k` thread colors. Slot 0 is always near-black.
+/// Slots 1..k are saliency-weighted OKLab k-means centroids with
+/// muddy-centroid rejection; if too few survive, the canonical
+/// primary ranker fills the remainder. Output is sorted dark-to-light
+/// and returned as `k * 3` sRGB bytes.
 pub fn extract_palette_bytes(
     rgba: &[u8],
     size: usize,
@@ -79,32 +99,375 @@ pub fn extract_palette_bytes(
     if !(1..=MAX_K).contains(&k) {
         return Err("palette size must be in 1..=8");
     }
-    let _ = face;
-    let _ = seed;
 
-    // k=1 is always black — the mono baseline.
     if k == 1 {
         return Ok(BLACK_SRGB.to_vec());
     }
 
-    let samples = downsample_linear_rgb(rgba, size);
+    let samples = sample_with_saliency(rgba, size, face);
     if samples.is_empty() {
         return Ok(BLACK_SRGB.repeat(k));
     }
 
-    // Pre-bake the canonical primaries in linear RGB, plus each one's
-    // "darkening basis" (board - primary), which is how a crossing
-    // contributes to closing the target-vs-board gap in partitive
-    // terms.
+    // Chromatic centroids come from saliency-weighted OKLab k-means
+    // on samples that aren't already well-explained by the black
+    // anchor — i.e., exclude near-black pixels so the chromatic
+    // clustering doesn't waste a centroid on shadow.
+    let black_oklab = linear_to_oklab(srgb_bytes_to_linear(BLACK_SRGB));
+    let chromatic_samples: Vec<WeightedLab> = samples
+        .iter()
+        .filter(|s| oklab_distance(&s.oklab, &black_oklab) > 0.15)
+        .cloned()
+        .collect();
+
+    let target_chromatic = k - 1;
+    let chromatic: Vec<[u8; 3]> = if chromatic_samples.is_empty() {
+        Vec::new()
+    } else {
+        oklab_kmeans_with_muddy_rejection(&chromatic_samples, target_chromatic, seed)
+            .into_iter()
+            .map(oklab_to_srgb_bytes_clamped)
+            .collect()
+    };
+
+    let mut picks: Vec<[u8; 3]> = Vec::with_capacity(k);
+    picks.push(BLACK_SRGB);
+    for c in chromatic.iter().take(target_chromatic) {
+        if !picks.iter().any(|p| srgb_bytes_similar(*p, *c)) {
+            picks.push(*c);
+        }
+    }
+
+    // If k-means undersupplied (muddy image, rejections, dedupe),
+    // top up from the canonical primary ranker.
+    if picks.len() < k {
+        let fallback = primary_fallback_palette(&samples, k, &picks);
+        for c in fallback {
+            if picks.len() >= k {
+                break;
+            }
+            if !picks.iter().any(|p| srgb_bytes_similar(*p, c)) {
+                picks.push(c);
+            }
+        }
+    }
+
+    picks.sort_by(|a, b| {
+        rec709_srgb(*a)
+            .partial_cmp(&rec709_srgb(*b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out = Vec::with_capacity(picks.len() * 3);
+    for p in &picks {
+        out.extend_from_slice(p);
+    }
+    Ok(out)
+}
+
+/// Given an image and an existing partial palette, return the single
+/// best new color (sRGB bytes) to maximize gamut coverage. The
+/// heuristic: for each canonical primary, score how much it reduces
+/// the per-sample OKLab distance to the nearest existing palette
+/// color, weighted by saliency; return the canonical primary with
+/// the highest improvement. Primaries already present in the palette
+/// (within `DUPLICATE_EPSILON` OKLab) are skipped.
+pub fn suggest_next_color(
+    rgba: &[u8],
+    size: usize,
+    existing_srgb: &[u8],
+    face: Option<FaceBox>,
+) -> Result<[u8; 3], &'static str> {
+    if rgba.len() != size * size * 4 {
+        return Err("rgba length must equal width * height * 4");
+    }
+    // `is_multiple_of` is unstable on our 1.83 MSRV; both the
+    // fallback allow for older toolchains and the lint name for
+    // 1.92+ have to be permitted for `cargo clippy -D warnings`.
+    #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+    let bad_len = existing_srgb.len() % 3 != 0;
+    if bad_len {
+        return Err("existing palette must be a multiple of 3 bytes (rgb)");
+    }
+
+    // An empty palette always starts with the structural black
+    // anchor — every Vrellis-style build needs it and returning
+    // anything else makes the `[+]` button's first click surprising.
+    if existing_srgb.is_empty() {
+        return Ok(BLACK_SRGB);
+    }
+
+    let samples = sample_with_saliency(rgba, size, face);
+    if samples.is_empty() {
+        return Ok(CANONICAL_PRIMARIES[1]);
+    }
+
+    let existing_oklab: Vec<[f32; 3]> = existing_srgb
+        .chunks_exact(3)
+        .map(|c| linear_to_oklab(srgb_bytes_to_linear([c[0], c[1], c[2]])))
+        .collect();
+
+    // Baseline: per-sample distance to nearest existing palette color.
+    // If the palette is empty, fall back to uniform baseline (infinite
+    // distance) so any primary is an improvement.
+    let baseline: Vec<f32> = samples
+        .iter()
+        .map(|s| {
+            existing_oklab
+                .iter()
+                .map(|e| oklab_distance(&s.oklab, e))
+                .fold(f32::INFINITY, f32::min)
+        })
+        .collect();
+
+    let mut best_idx = 1usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for (i, primary) in CANONICAL_PRIMARIES.iter().enumerate() {
+        let p_oklab = linear_to_oklab(srgb_bytes_to_linear(*primary));
+        if existing_oklab
+            .iter()
+            .any(|e| oklab_distance(e, &p_oklab) < DUPLICATE_EPSILON)
+        {
+            continue;
+        }
+        let mut score = 0.0f32;
+        for (sample, &base) in samples.iter().zip(baseline.iter()) {
+            let d = oklab_distance(&sample.oklab, &p_oklab);
+            let improvement = if base.is_finite() {
+                (base - d).max(0.0)
+            } else {
+                // No existing palette — score by inverse distance so
+                // we prefer primaries close to the image content.
+                (1.0 - d).max(0.0)
+            };
+            score += improvement * sample.weight;
+        }
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+    Ok(CANONICAL_PRIMARIES[best_idx])
+}
+
+#[derive(Clone, Copy)]
+struct WeightedLab {
+    oklab: [f32; 3],
+    weight: f32,
+}
+
+/// Downsample the image and compute OKLab + saliency weight per
+/// sample. Saliency multiplies a face-box emphasis into each sample
+/// weight; without a face box, all samples weigh equally.
+fn sample_with_saliency(rgba: &[u8], size: usize, face: Option<FaceBox>) -> Vec<WeightedLab> {
+    let tile = size.max(SAMPLE_DIM) / SAMPLE_DIM;
+    let dim = (size / tile).max(1);
+    let mut out = Vec::with_capacity(dim * dim);
+    let face_cx = face.map(|f| f.x + f.w * 0.5);
+    let face_cy = face.map(|f| f.y + f.h * 0.5);
+    let face_sx = face.map(|f| (f.w * 0.6).max(1.0));
+    let face_sy = face.map(|f| (f.h * 0.6).max(1.0));
+    for ty in 0..dim {
+        for tx in 0..dim {
+            let mut sum = [0.0f32; 3];
+            let mut n = 0u32;
+            let y_start = ty * tile;
+            let x_start = tx * tile;
+            let y_end = (y_start + tile).min(size);
+            let x_end = (x_start + tile).min(size);
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let base = (y * size + x) * 4;
+                    if rgba[base + 3] < 8 {
+                        continue;
+                    }
+                    sum[0] += srgb_to_linear(rgba[base] as f32 / 255.0);
+                    sum[1] += srgb_to_linear(rgba[base + 1] as f32 / 255.0);
+                    sum[2] += srgb_to_linear(rgba[base + 2] as f32 / 255.0);
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                continue;
+            }
+            let inv = 1.0 / n as f32;
+            let linear = [sum[0] * inv, sum[1] * inv, sum[2] * inv];
+            let oklab = linear_to_oklab(linear);
+            let cx = (x_start + x_end) as f32 * 0.5;
+            let cy = (y_start + y_end) as f32 * 0.5;
+            let weight = face_weight(cx, cy, face_cx, face_cy, face_sx, face_sy);
+            out.push(WeightedLab { oklab, weight });
+        }
+    }
+    out
+}
+
+fn face_weight(
+    x: f32,
+    y: f32,
+    cx: Option<f32>,
+    cy: Option<f32>,
+    sx: Option<f32>,
+    sy: Option<f32>,
+) -> f32 {
+    match (cx, cy, sx, sy) {
+        (Some(cx), Some(cy), Some(sx), Some(sy)) => {
+            let dx = (x - cx) / sx;
+            let dy = (y - cy) / sy;
+            1.0 + 1.5 * (-0.5 * (dx * dx + dy * dy)).exp()
+        }
+        _ => 1.0,
+    }
+}
+
+/// Weighted OKLab k-means with k-means++ seeding and muddy-centroid
+/// rejection. Returns up to `k` chromatic centroids. If a clustering
+/// pass produces a muddy centroid, it's dropped and the pass reruns
+/// for `k-1`. Bottoms out at `k=0` if no chromatic content exists.
+fn oklab_kmeans_with_muddy_rejection(
+    samples: &[WeightedLab],
+    k: usize,
+    seed: u64,
+) -> Vec<[f32; 3]> {
+    if k == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+    let mut remaining = k;
+    while remaining > 0 {
+        let centroids = oklab_kmeans(samples, remaining, seed);
+        let survivors: Vec<[f32; 3]> = centroids
+            .into_iter()
+            .filter(|c| oklab_chroma(*c) >= MUDDY_CHROMA_THRESHOLD && !too_light_for_board(*c))
+            .collect();
+        if survivors.len() == remaining {
+            return survivors;
+        }
+        // At least one centroid was muddy or too close to the board
+        // luminance. Drop one slot and try again — the rejected region
+        // gets absorbed into other clusters or left unexplained.
+        remaining = remaining.saturating_sub(1);
+    }
+    Vec::new()
+}
+
+fn too_light_for_board(oklab: [f32; 3]) -> bool {
+    let linear = oklab_to_linear(oklab);
+    let lum = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    lum > BOARD_LUMINANCE * BOARD_LIGHT_CAP_RATIO
+}
+
+fn oklab_kmeans(samples: &[WeightedLab], k: usize, seed: u64) -> Vec<[f32; 3]> {
+    if k == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+    let mut centroids = kmeans_pp_init(samples, k, seed);
+    let mut assignments = vec![0usize; samples.len()];
+    for _ in 0..24 {
+        let mut changed = false;
+        for (i, s) in samples.iter().enumerate() {
+            let mut best = 0usize;
+            let mut best_d = f32::INFINITY;
+            for (c, centroid) in centroids.iter().enumerate() {
+                let d = oklab_distance(&s.oklab, centroid);
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            if assignments[i] != best {
+                assignments[i] = best;
+                changed = true;
+            }
+        }
+        let mut sums = vec![[0.0f32; 3]; k];
+        let mut wsum = vec![0.0f32; k];
+        for (i, s) in samples.iter().enumerate() {
+            let c = assignments[i];
+            sums[c][0] += s.oklab[0] * s.weight;
+            sums[c][1] += s.oklab[1] * s.weight;
+            sums[c][2] += s.oklab[2] * s.weight;
+            wsum[c] += s.weight;
+        }
+        for c in 0..k {
+            if wsum[c] > 1e-6 {
+                let inv = 1.0 / wsum[c];
+                centroids[c] = [sums[c][0] * inv, sums[c][1] * inv, sums[c][2] * inv];
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    centroids
+}
+
+fn kmeans_pp_init(samples: &[WeightedLab], k: usize, seed: u64) -> Vec<[f32; 3]> {
+    // Simple deterministic k-means++: seed first centroid at the
+    // highest-weight sample, then repeatedly pick the sample farthest
+    // from any existing centroid (weighted by saliency).
+    let mut centroids = Vec::with_capacity(k);
+    let mut best_idx = 0;
+    let mut best_w = f32::NEG_INFINITY;
+    for (i, s) in samples.iter().enumerate() {
+        if s.weight > best_w {
+            best_w = s.weight;
+            best_idx = i;
+        }
+    }
+    centroids.push(samples[best_idx].oklab);
+    let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    while centroids.len() < k {
+        let mut total = 0.0f64;
+        let distances: Vec<f32> = samples
+            .iter()
+            .map(|s| {
+                let d = centroids
+                    .iter()
+                    .map(|c| oklab_distance(&s.oklab, c))
+                    .fold(f32::INFINITY, f32::min);
+                let score = d * d * s.weight;
+                total += score as f64;
+                score
+            })
+            .collect();
+        if total <= 0.0 {
+            // All samples coincide with existing centroids — bail out
+            // with a nudged duplicate rather than looping forever.
+            let last = *centroids.last().unwrap();
+            centroids.push([last[0], last[1] + 0.01, last[2]]);
+            continue;
+        }
+        // Deterministic pseudo-random draw using seed-derived rng.
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = (rng >> 33) as f32 / u32::MAX as f32;
+        let target = r as f64 * total;
+        let mut acc = 0.0f64;
+        let mut picked = 0usize;
+        for (i, &d) in distances.iter().enumerate() {
+            acc += d as f64;
+            if acc >= target {
+                picked = i;
+                break;
+            }
+        }
+        centroids.push(samples[picked].oklab);
+    }
+    centroids
+}
+
+/// Top up a palette from the canonical primary ranker when k-means
+/// under-supplied. Reproduces the earlier pre-OKLab ranker behavior
+/// (chromatic-basis projection) for legacy test coverage.
+fn primary_fallback_palette(
+    samples: &[WeightedLab],
+    k: usize,
+    already_picked: &[[u8; 3]],
+) -> Vec<[u8; 3]> {
     let primaries_linear: Vec<[f32; 3]> = CANONICAL_PRIMARIES
         .iter()
-        .map(|p| {
-            [
-                srgb_to_linear(p[0] as f32 / 255.0),
-                srgb_to_linear(p[1] as f32 / 255.0),
-                srgb_to_linear(p[2] as f32 / 255.0),
-            ]
-        })
+        .map(|p| srgb_bytes_to_linear(*p))
         .collect();
     let darkening_basis: Vec<[f32; 3]> = primaries_linear
         .iter()
@@ -116,18 +479,6 @@ pub fn extract_palette_bytes(
             ]
         })
         .collect();
-
-    // Each primary's chromatic basis: darkening basis minus its
-    // achromatic component (the minimum of its three channels). This
-    // is the "which hue does this thread lean toward as it darkens"
-    // component. Black's chromatic basis is zero (it darkens
-    // uniformly); red's chromatic basis emphasizes G and B
-    // (red thread leaves R behind when it occludes board); etc.
-    // Scoring against chromatic basis instead of raw darkening basis
-    // stops every non-black primary from scoring ~the same on dark
-    // pixels — only primaries whose hue actually matches the image's
-    // chromatic residual get credit, so the top-k picks discriminate
-    // by hue rather than by raw darkening magnitude.
     let chromatic_basis: Vec<[f32; 3]> = darkening_basis
         .iter()
         .map(|b| {
@@ -136,24 +487,18 @@ pub fn extract_palette_bytes(
         })
         .collect();
 
-    // Score each primary by projecting the chromatic part of each
-    // pixel's (board − target) residual onto its chromatic basis.
-    // Black has zero chromatic basis, so it scores 0 — but black is
-    // pinned as slot 0 by convention, so this is fine. The ranking
-    // is effectively "which non-black primary best matches the
-    // image's chromatic demand".
     let mut scores = vec![0.0f32; CANONICAL_PRIMARIES.len()];
-    for s in &samples {
+    for s in samples {
+        let linear = oklab_to_linear(s.oklab);
         let b = [
-            (BOARD_LINEAR[0] - s[0]).max(0.0),
-            (BOARD_LINEAR[1] - s[1]).max(0.0),
-            (BOARD_LINEAR[2] - s[2]).max(0.0),
+            (BOARD_LINEAR[0] - linear[0]).max(0.0),
+            (BOARD_LINEAR[1] - linear[1]).max(0.0),
+            (BOARD_LINEAR[2] - linear[2]).max(0.0),
         ];
         let m = b[0].min(b[1]).min(b[2]);
         let b_chrom = [b[0] - m, b[1] - m, b[2] - m];
-        let b_chrom_mag_sq =
-            b_chrom[0] * b_chrom[0] + b_chrom[1] * b_chrom[1] + b_chrom[2] * b_chrom[2];
-        if b_chrom_mag_sq <= 1e-6 {
+        let mag = b_chrom[0] * b_chrom[0] + b_chrom[1] * b_chrom[1] + b_chrom[2] * b_chrom[2];
+        if mag <= 1e-6 {
             continue;
         }
         for (i, basis) in chromatic_basis.iter().enumerate() {
@@ -165,79 +510,119 @@ pub fn extract_palette_bytes(
             if dot <= 0.0 {
                 continue;
             }
-            scores[i] += dot / basis_mag_sq.sqrt();
+            scores[i] += dot * s.weight / basis_mag_sq.sqrt();
         }
     }
-
-    // Always pin black as slot 0 — it's the universal darkness
-    // primary. Rank the other primaries by score, take the top (k−1).
     let mut ranked: Vec<(usize, f32)> = scores
         .iter()
         .enumerate()
-        .skip(1) // skip black
+        .skip(1)
         .map(|(i, &s)| (i, s))
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut picks: Vec<[u8; 3]> = Vec::with_capacity(k);
-    picks.push(CANONICAL_PRIMARIES[0]); // black
-    for (idx, _) in ranked.into_iter().take(k - 1) {
-        picks.push(CANONICAL_PRIMARIES[idx]);
-    }
-
-    // Dark-to-light build order so the physical builder lays the
-    // darkest threads first.
-    picks.sort_by(|a, b| {
-        let la = rec709_srgb(*a);
-        let lb = rec709_srgb(*b);
-        la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut out = Vec::with_capacity(k * 3);
-    for p in &picks {
-        out.extend_from_slice(p);
-    }
-    Ok(out)
-}
-
-fn downsample_linear_rgb(rgba: &[u8], size: usize) -> Vec<[f32; 3]> {
-    let tile = size.max(SAMPLE_DIM) / SAMPLE_DIM;
-    let dim = (size / tile).max(1);
-    let mut out = Vec::with_capacity(dim * dim);
-    for ty in 0..dim {
-        for tx in 0..dim {
-            let mut sum = [0.0f32; 3];
-            let mut n = 0u32;
-            let y_start = ty * tile;
-            let x_start = tx * tile;
-            for y in y_start..(y_start + tile).min(size) {
-                for x in x_start..(x_start + tile).min(size) {
-                    let base = (y * size + x) * 4;
-                    if rgba[base + 3] < 8 {
-                        continue;
-                    }
-                    sum[0] += srgb_to_linear(rgba[base] as f32 / 255.0);
-                    sum[1] += srgb_to_linear(rgba[base + 1] as f32 / 255.0);
-                    sum[2] += srgb_to_linear(rgba[base + 2] as f32 / 255.0);
-                    n += 1;
-                }
-            }
-            if n > 0 {
-                let inv = 1.0 / n as f32;
-                out.push([sum[0] * inv, sum[1] * inv, sum[2] * inv]);
-            }
+    let mut out = Vec::with_capacity(k);
+    for (idx, _) in ranked {
+        if out.len() >= k {
+            break;
         }
+        let c = CANONICAL_PRIMARIES[idx];
+        if already_picked
+            .iter()
+            .chain(out.iter())
+            .any(|p| srgb_bytes_similar(*p, c))
+        {
+            continue;
+        }
+        out.push(c);
     }
     out
 }
 
 fn rec709_srgb(c: [u8; 3]) -> f32 {
-    // Rough Rec.709 on sRGB bytes (not gamma-corrected to linear —
-    // enough for dark-to-light palette ordering).
     let r = c[0] as f32 / 255.0;
     let g = c[1] as f32 / 255.0;
     let b = c[2] as f32 / 255.0;
     0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn srgb_bytes_to_linear(c: [u8; 3]) -> [f32; 3] {
+    [
+        srgb_to_linear(c[0] as f32 / 255.0),
+        srgb_to_linear(c[1] as f32 / 255.0),
+        srgb_to_linear(c[2] as f32 / 255.0),
+    ]
+}
+
+fn linear_to_srgb_byte(u: f32) -> u8 {
+    let clamped = u.clamp(0.0, 1.0);
+    let s = if clamped <= 0.003_130_8 {
+        clamped * 12.92
+    } else {
+        1.055 * clamped.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+}
+
+fn oklab_to_srgb_bytes_clamped(lab: [f32; 3]) -> [u8; 3] {
+    let linear = oklab_to_linear(lab);
+    [
+        linear_to_srgb_byte(linear[0]),
+        linear_to_srgb_byte(linear[1]),
+        linear_to_srgb_byte(linear[2]),
+    ]
+}
+
+fn srgb_bytes_similar(a: [u8; 3], b: [u8; 3]) -> bool {
+    let dr = a[0] as i32 - b[0] as i32;
+    let dg = a[1] as i32 - b[1] as i32;
+    let db = a[2] as i32 - b[2] as i32;
+    dr * dr + dg * dg + db * db < 64
+}
+
+fn oklab_distance(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    let dl = a[0] - b[0];
+    let da = a[1] - b[1];
+    let db = a[2] - b[2];
+    (dl * dl + da * da + db * db).sqrt()
+}
+
+fn oklab_chroma(c: [f32; 3]) -> f32 {
+    (c[1] * c[1] + c[2] * c[2]).sqrt()
+}
+
+/// Björn Ottosson's OKLab (2020). Input is linear sRGB in [0,1].
+#[allow(clippy::excessive_precision)]
+fn linear_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    let r = rgb[0];
+    let g = rgb[1];
+    let b = rgb[2];
+    let l = 0.412_221_47 * r + 0.536_332_56 * g + 0.051_445_995 * b;
+    let m = 0.211_903_5 * r + 0.680_699_55 * g + 0.107_396_96 * b;
+    let s = 0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b;
+    let l_ = l.cbrt();
+    let m_ = m.cbrt();
+    let s_ = s.cbrt();
+    [
+        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_,
+    ]
+}
+
+#[allow(clippy::excessive_precision)]
+fn oklab_to_linear(lab: [f32; 3]) -> [f32; 3] {
+    let l_ = lab[0] + 0.396_337_78 * lab[1] + 0.215_803_76 * lab[2];
+    let m_ = lab[0] - 0.105_561_346 * lab[1] - 0.063_854_17 * lab[2];
+    let s_ = lab[0] - 0.089_484_18 * lab[1] - 1.291_485_5 * lab[2];
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    [
+        4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_93 * s,
+        -1.268_438 * l + 2.609_757_4 * m - 0.341_319_4 * s,
+        -0.004_196_086 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+    ]
 }
 
 #[cfg(test)]
@@ -260,6 +645,39 @@ mod tests {
     }
 
     #[test]
+    fn oklab_roundtrip_preserves_linear_rgb() {
+        let cases = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5, 0.3, 0.7],
+        ];
+        for c in cases {
+            let lab = linear_to_oklab(c);
+            let rt = oklab_to_linear(lab);
+            for i in 0..3 {
+                assert!(
+                    (c[i] - rt[i]).abs() < 1e-3,
+                    "roundtrip failed: {c:?} → {rt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oklab_black_has_near_zero_chroma() {
+        let lab = linear_to_oklab([0.01, 0.01, 0.01]);
+        assert!(oklab_chroma(lab) < 1e-3);
+    }
+
+    #[test]
+    fn oklab_saturated_red_has_substantial_chroma() {
+        let lab = linear_to_oklab(srgb_bytes_to_linear([0xc0, 0x20, 0x20]));
+        assert!(oklab_chroma(lab) > 0.1);
+    }
+
+    #[test]
     fn k_of_one_is_always_black() {
         let warm = rgb_image(64, |_, _| [200, 50, 80]);
         let out = extract_palette_bytes(&warm, 64, 1, 0, None).unwrap();
@@ -271,49 +689,12 @@ mod tests {
 
     #[test]
     fn palette_slot_zero_is_always_black() {
-        // Black is the universal darkness primary; every palette must
-        // include it for the luminance axis to have a solid anchor.
         for k in 2..=6 {
             let img = rgb_image(64, |_, _| [180, 120, 60]);
             let out = extract_palette_bytes(&img, 64, k, 0, None).unwrap();
             let slot0 = [out[0], out[1], out[2]];
-            // slot 0 after dark-to-light ordering: the DARKEST of the
-            // picks, which for any palette including black is black.
             assert_eq!(slot0, BLACK_SRGB, "k={k}: slot 0 should be black");
         }
-    }
-
-    #[test]
-    fn warm_image_picks_warm_primaries_over_cool() {
-        // A warm portrait's residual lives in the red/yellow half of
-        // the wheel. With a larger canonical vocabulary the picks
-        // include finer warm subdivisions (orange, salmon, etc.) —
-        // the test just requires ZERO cool primaries in the top-4.
-        let size = 96;
-        let rgba = rgb_image(size, |_, _| [220, 160, 100]);
-        let out = extract_palette_bytes(&rgba, size, 4, 0, None).unwrap();
-        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-        let is_warm = |c: [u8; 3]| c[0] >= c[2]; // red/green >= blue
-        for c in &hexes {
-            if *c == BLACK_SRGB {
-                continue;
-            }
-            assert!(is_warm(*c), "unexpected cool primary in warm image: {c:?}");
-        }
-    }
-
-    #[test]
-    fn cool_image_picks_cool_primary_over_warm() {
-        let size = 96;
-        let rgba = rgb_image(size, |_, _| [30, 80, 200]);
-        let out = extract_palette_bytes(&rgba, size, 2, 0, None).unwrap();
-        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-        assert_eq!(hexes[0], BLACK_SRGB); // slot 0
-        let slot1 = hexes[1];
-        assert!(
-            slot1[2] > slot1[0],
-            "slot 1 should lean cool (blue > red): {slot1:?}"
-        );
     }
 
     #[test]
@@ -328,6 +709,160 @@ mod tests {
             lums.windows(2).all(|w| w[0] <= w[1] + 1e-3),
             "palette not dark-to-light: {lums:?}"
         );
+    }
+
+    #[test]
+    fn warm_image_picks_warm_primaries_over_cool() {
+        let size = 96;
+        let rgba = rgb_image(size, |_, _| [220, 160, 100]);
+        let out = extract_palette_bytes(&rgba, size, 4, 0, None).unwrap();
+        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        for c in &hexes {
+            if *c == BLACK_SRGB {
+                continue;
+            }
+            assert!(c[0] >= c[2], "unexpected cool primary in warm image: {c:?}");
+        }
+    }
+
+    #[test]
+    fn cool_image_picks_cool_primary_over_warm() {
+        let size = 96;
+        let rgba = rgb_image(size, |_, _| [30, 80, 200]);
+        let out = extract_palette_bytes(&rgba, size, 2, 0, None).unwrap();
+        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        assert_eq!(hexes[0], BLACK_SRGB);
+        let slot1 = hexes[1];
+        assert!(
+            slot1[2] > slot1[0],
+            "slot 1 should lean cool (blue > red): {slot1:?}"
+        );
+    }
+
+    #[test]
+    fn red_blue_gradient_picks_both_not_muddy_middle() {
+        // Image spans red to blue along x. OKLab k-means with muddy
+        // rejection must place centroids on the saturated ends rather
+        // than in the desaturated middle. Two chromatic slots + black.
+        let size = 96;
+        let rgba = rgb_image(size, |x, _| {
+            let t = x as f32 / (size - 1) as f32;
+            let r = (255.0 * (1.0 - t)) as u8;
+            let b = (255.0 * t) as u8;
+            [r, 20, b]
+        });
+        let out = extract_palette_bytes(&rgba, size, 3, 0, None).unwrap();
+        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        assert_eq!(hexes[0], BLACK_SRGB);
+        // Remaining two centroids should have opposite red/blue bias.
+        let s1 = hexes[1];
+        let s2 = hexes[2];
+        let warm_cool = |c: [u8; 3]| c[0] as i32 - c[2] as i32;
+        let wc1 = warm_cool(s1);
+        let wc2 = warm_cool(s2);
+        assert!(
+            wc1.signum() != wc2.signum() || wc1.abs() + wc2.abs() > 40,
+            "expected opposing warm/cool centroids, got {s1:?} and {s2:?}"
+        );
+    }
+
+    #[test]
+    fn greyscale_image_falls_back_without_panic() {
+        // Pure grey has no chromatic content; k-means must reject all
+        // chromatic centroids and the fallback primary ranker fills
+        // the palette. The important thing is no panic and a
+        // black-anchored palette of the requested size.
+        let rgba = rgb_image(64, |_, _| [120, 120, 120]);
+        let out = extract_palette_bytes(&rgba, 64, 4, 0, None).unwrap();
+        assert_eq!(out.len(), 4 * 3);
+        assert_eq!([out[0], out[1], out[2]], BLACK_SRGB);
+    }
+
+    #[test]
+    fn suggest_next_on_empty_returns_black() {
+        let rgba = rgb_image(64, |_, _| [200, 100, 100]);
+        let s = suggest_next_color(&rgba, 64, &[], None).unwrap();
+        assert_eq!(s, BLACK_SRGB);
+    }
+
+    #[test]
+    fn suggest_next_on_black_returns_warm_for_warm_image() {
+        let rgba = rgb_image(96, |_, _| [220, 100, 60]);
+        let s = suggest_next_color(&rgba, 96, &BLACK_SRGB, None).unwrap();
+        assert!(
+            s[0] > s[2],
+            "warm image expected a warm suggestion, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_next_avoids_duplicating_existing() {
+        // Seed with black and the saturated red primary; ask for a
+        // suggestion on a warm image. The suggestion must not be the
+        // saturated red primary already present.
+        let rgba = rgb_image(96, |_, _| [220, 100, 60]);
+        let mut existing = Vec::new();
+        existing.extend_from_slice(&BLACK_SRGB);
+        existing.extend_from_slice(&CANONICAL_PRIMARIES[1]); // saturated red
+        let s = suggest_next_color(&rgba, 96, &existing, None).unwrap();
+        assert_ne!(s, CANONICAL_PRIMARIES[1]);
+        assert_ne!(s, BLACK_SRGB);
+    }
+
+    #[test]
+    fn muddy_wash_reclusters_and_palette_has_no_muddy_entries() {
+        // A warm-neutral gradient without any saturated content is
+        // exactly the "middle mud" k-means wants to park a centroid in.
+        // With muddy rejection + k-1 reclustering, the returned palette
+        // must not contain any low-chroma chromatic entries — either
+        // the fallback ranker's saturated primaries, or fewer slots.
+        let size = 96;
+        let rgba = rgb_image(size, |x, y| {
+            let t = (x + y) as f32 / (2.0 * (size - 1) as f32);
+            let r = (180.0 + 40.0 * t) as u8;
+            let g = (140.0 + 30.0 * t) as u8;
+            let b = (120.0 + 20.0 * t) as u8;
+            [r, g, b]
+        });
+        let out = extract_palette_bytes(&rgba, size, 5, 0, None).unwrap();
+        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        assert_eq!(hexes[0], BLACK_SRGB);
+        for c in hexes.iter().skip(1) {
+            let lab = linear_to_oklab(srgb_bytes_to_linear(*c));
+            assert!(
+                oklab_chroma(lab) >= MUDDY_CHROMA_THRESHOLD - 0.005,
+                "palette entry {c:?} is muddy (chroma {}) — recluster should have dropped it",
+                oklab_chroma(lab)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_near_board_centroids_and_palette_stays_darkenable() {
+        // High-key image: a small saturated red in a sea of near-cream.
+        // Any k-means centroid near the cream board is useless as a
+        // thread (can't darken the board), so the board-luminance cap
+        // must exclude it. Every returned palette entry must sit below
+        // 95% of board luminance.
+        let size = 96;
+        let rgba = rgb_image(size, |x, y| {
+            if x < size / 8 && y < size / 8 {
+                [220, 30, 30]
+            } else {
+                [240, 232, 220]
+            }
+        });
+        let out = extract_palette_bytes(&rgba, size, 4, 0, None).unwrap();
+        let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        let cap = BOARD_LUMINANCE * BOARD_LIGHT_CAP_RATIO;
+        for c in &hexes {
+            let linear = srgb_bytes_to_linear(*c);
+            let lum = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+            assert!(
+                lum <= cap + 1e-3,
+                "palette entry {c:?} is too close to board luminance ({lum} > {cap})",
+            );
+        }
     }
 
     #[test]

@@ -41,6 +41,36 @@ pub fn extract_palette(
         .map_err(JsValue::from_str)
 }
 
+/// Suggest the single best next color to extend an existing partial
+/// palette for the given image. Returns 3 sRGB bytes. Powers the
+/// UI `[+]` swatch. `existing_srgb` is a flat `N * 3` buffer
+/// matching the buffer format consumed by the `Solver` constructor;
+/// pass an empty slice to suggest a first color (near-black).
+#[wasm_bindgen(js_name = suggestNextColor)]
+pub fn suggest_next_color(
+    rgba: &[u8],
+    size: u32,
+    existing_srgb: &[u8],
+    face_x: f32,
+    face_y: f32,
+    face_w: f32,
+    face_h: f32,
+) -> Result<Vec<u8>, JsValue> {
+    let face = if face_w > 0.0 && face_h > 0.0 {
+        Some(FaceBox {
+            x: face_x,
+            y: face_y,
+            w: face_w,
+            h: face_h,
+        })
+    } else {
+        None
+    };
+    palette_extract::suggest_next_color(rgba, size as usize, existing_srgb, face)
+        .map(|c| c.to_vec())
+        .map_err(JsValue::from_str)
+}
+
 /// Returns the semantic version of the solver crate.
 #[wasm_bindgen]
 pub fn version() -> String {
