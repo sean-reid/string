@@ -42,6 +42,7 @@ const api: SolverWorkerApi = {
     wasmParams.ban_window = params.ban_window;
     wasmParams.temperature_start = params.temperature_start;
     wasmParams.temperature_end = params.temperature_end;
+    wasmParams.switch_cost_factor = params.switch_cost_factor;
     wasmParams.face_x = extras.faceX;
     wasmParams.face_y = extras.faceY;
     wasmParams.face_w = extras.faceW;
@@ -49,6 +50,10 @@ const api: SolverWorkerApi = {
     wasmParams.face_emphasis = extras.faceEmphasis;
 
     instance = new solver.Solver(rgba, size, wasmParams, extras.paletteSrgb, seed);
+
+    if (extras.colorBudgets && extras.colorBudgets.length > 0) {
+      instance.setColorBudgets(extras.colorBudgets);
+    }
 
     const pinPositions = instance.pinPositions();
     const copy = new Float32Array(pinPositions.length);
@@ -91,6 +96,27 @@ const api: SolverWorkerApi = {
       size,
       k,
       seed,
+      face?.x ?? 0,
+      face?.y ?? 0,
+      face?.w ?? 0,
+      face?.h ?? 0,
+    );
+    const copy = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    return Comlink.transfer(copy, [copy.buffer]);
+  },
+
+  async suggestNextColor(
+    rgba: Uint8Array,
+    size: number,
+    existingSrgb: Uint8Array,
+    face: { x: number; y: number; w: number; h: number } | null,
+  ): Promise<Uint8Array> {
+    const solver = await getSolver();
+    const bytes = solver.suggestNextColor(
+      rgba,
+      size,
+      existingSrgb,
       face?.x ?? 0,
       face?.y ?? 0,
       face?.w ?? 0,

@@ -2,8 +2,11 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { useImageStore } from "@/image/store";
 import {
+  DEFAULT_COLOR_LINE_BUDGET,
   DEFAULT_PHYSICAL,
   DEFAULT_THREAD_COLOR,
+  MAX_PALETTE_SIZE,
+  deriveColorBudgets,
   paletteToSrgbBytes,
   type PhysicalParams,
   deriveSolverParams,
@@ -14,6 +17,15 @@ import { getSolverWorker, terminateSolverWorker } from "./worker-client";
 const DEFAULT_FACE_EMPHASIS = 1.5;
 const BATCH_SIZE = 24;
 const STORAGE_KEY = "string.solver.v1";
+
+function arraysShallowEqual<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 interface SolverState {
   status: SolverStatus;
@@ -36,6 +48,10 @@ interface SolverState {
   generationId: number;
   setPhysical: (update: Partial<PhysicalParams>) => void;
   setSeed: (seed: bigint) => void;
+  /** Reset the palette back to the single-color default. Called
+   *  whenever a new image is ingested — palettes are image-specific,
+   *  so reusing yesterday's colors on a new subject makes no sense. */
+  resetPalette: () => void;
   start: () => Promise<void>;
   cancel: () => void;
   reset: () => void;
@@ -82,11 +98,53 @@ const baseStoreFactory = (
   generationId: 0,
 
   setPhysical(update) {
-    set((prev) => ({ physical: { ...prev.physical, ...update } }));
+    set((prev) => {
+      const next: PhysicalParams = { ...prev.physical, ...update };
+      if (update.palette !== undefined) {
+        const wasColor = prev.physical.palette.length > 1;
+        const isColor = next.palette.length > 1;
+        // Auto-bump the default line budget when the user first
+        // unlocks color mode — chromatic slots need headroom or the
+        // accent colors starve. Only if the user hasn't already tuned
+        // the mono default away; custom values are preserved.
+        if (!wasColor && isColor && prev.physical.lineBudget === DEFAULT_PHYSICAL.lineBudget) {
+          next.lineBudget = DEFAULT_COLOR_LINE_BUDGET;
+        } else if (
+          wasColor &&
+          !isColor &&
+          prev.physical.lineBudget === DEFAULT_COLOR_LINE_BUDGET
+        ) {
+          next.lineBudget = DEFAULT_PHYSICAL.lineBudget;
+        }
+        const paletteChanged = !arraysShallowEqual(prev.physical.palette, next.palette);
+        if (paletteChanged && (prev.status === "running" || prev.status === "done")) {
+          // Editing the palette makes the in-flight or just-finished
+          // solve stale — invalidate it so the user's next Generate
+          // runs against the new colors from scratch.
+          terminateSolverWorker();
+          return {
+            physical: next,
+            generationId: prev.generationId + 1,
+            status: prev.status === "running" ? ("cancelled" as SolverStatus) : prev.status,
+            sequence: prev.status === "running" ? [] : prev.sequence,
+            sequenceColors: prev.status === "running" ? [] : prev.sequenceColors,
+            linesDrawn: prev.status === "running" ? 0 : prev.linesDrawn,
+          };
+        }
+      }
+      return { physical: next };
+    });
   },
 
   setSeed(seed) {
     set({ seed });
+  },
+
+  resetPalette() {
+    set((prev) => ({
+      physical: { ...prev.physical, palette: [DEFAULT_THREAD_COLOR] },
+      palette: [DEFAULT_THREAD_COLOR],
+    }));
   },
 
   async start() {
@@ -119,14 +177,21 @@ const baseStoreFactory = (
       const physical = get().physical;
       const remote = getSolverWorker();
 
-      // Mono-only: always a single-black palette. No image-derived
-      // palette extraction, no suggestions list.
-      const palette = [...physical.palette];
+      const palette = [...physical.palette]
+        .slice(0, MAX_PALETTE_SIZE)
+        .filter((c) => typeof c === "string" && c.length > 0);
+      if (palette.length === 0) {
+        palette.push(DEFAULT_THREAD_COLOR);
+      }
+      const inColorMode = palette.length > 1;
 
+      // Color mode needs the full-chroma preprocessed input; mono
+      // collapses to luminance so the scalar-residual path stays
+      // byte-identical.
       const processed = await remote.preprocess(
         new Uint8Array(image.colorRgba),
         image.meta.size,
-        true,
+        !inColorMode,
       );
       if (get().generationId !== generationId) return;
 
@@ -149,6 +214,9 @@ const baseStoreFactory = (
         faceH: face?.h ?? 0,
         faceEmphasis: face ? DEFAULT_FACE_EMPHASIS : 0,
         paletteSrgb: paletteToSrgbBytes(palette),
+        colorBudgets: inColorMode
+          ? deriveColorBudgets(palette, raw.line_budget)
+          : undefined,
       };
       const init = await remote.init(
         processed,

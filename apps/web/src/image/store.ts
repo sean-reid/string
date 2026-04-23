@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { cacheBlob, clearCachedBlobs, getCachedBlob } from "./blob-cache";
 import type { DecodedImage, ImageMetadata, ImageStatus } from "./types";
 import { getImageWorker } from "./worker-client";
+import { useSolverStore } from "@/solver/store";
 
 const DEFAULT_SIZE = 700;
 const STORAGE_KEY = "string.image.v1";
@@ -33,6 +34,7 @@ export const useImageStore = create<ImageState>()(
 
       async ingest(blob, opts) {
         const current = get();
+        const previousHash = current.meta?.hash ?? null;
         current.bitmap?.close();
         set({
           status: "decoding",
@@ -47,6 +49,14 @@ export const useImageStore = create<ImageState>()(
             size: DEFAULT_SIZE,
             filename: opts?.filename,
           });
+          // Palettes are image-specific: yesterday's Vrellis-style
+          // warms don't apply to today's landscape. Reset when the
+          // user loads a genuinely new image. Re-ingesting the same
+          // hash (e.g. rehydration or re-selecting the same sample)
+          // leaves the palette alone.
+          if (previousHash !== decoded.meta.hash) {
+            useSolverStore.getState().resetPalette();
+          }
           set({
             status: "ready",
             bitmap: decoded.bitmap,

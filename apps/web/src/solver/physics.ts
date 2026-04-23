@@ -80,10 +80,24 @@ export const DEFAULT_PHYSICAL: PhysicalParams = {
   // algorithm uses ~4000 chords on a 300-pin board; we mirror that.
   lineBudget: 4000,
   minChordPct: 0.2,
-  // Single-thread mono: always black on cream board. No user-facing
-  // palette UI; color mode is disabled pending a better algorithm.
+  // Default to mono (black on cream). The palette picker lets the
+  // user add up to MAX_PALETTE_SIZE - 1 extra colors; swapping in a
+  // second color unlocks the 3-channel color solver.
   palette: [DEFAULT_THREAD_COLOR],
 };
+
+/// Target line budget when a user is building a color palette. Each
+/// color needs enough lines to emerge; the reference Vrellis-like
+/// color portrait uses ~5000 lines across ~4 colors. The live
+/// `physical.lineBudget` still takes precedence — this is the
+/// value we switch to when the user first unlocks color mode.
+export const DEFAULT_COLOR_LINE_BUDGET = 5000;
+
+/// Multiplicative score penalty applied to candidate (pin, color)
+/// pairs whose color differs from the currently wound spool. Mono
+/// ignores this; color mode uses it to produce Vrellis-style
+/// contiguous runs instead of interleaved chaos.
+export const DEFAULT_SWITCH_COST_FACTOR = 0.15;
 
 /** mm per solver-internal pixel at the given board size. */
 export function pixelMm(board: BoardSpec): number {
@@ -138,6 +152,7 @@ export function deriveSolverParams(
   const opacity = threadCoverage(thread, board);
   const minSkip = minSkipPins(physical.minChordPct, physical.pinCount);
   const banWindow = Math.max(5, Math.round(physical.pinCount * 0.07));
+  const inColorMode = physical.palette.length > 1;
   return {
     pin_count: physical.pinCount,
     line_budget: physical.lineBudget,
@@ -146,7 +161,36 @@ export function deriveSolverParams(
     ban_window: banWindow,
     temperature_start: 0.008,
     temperature_end: 0.0008,
+    switch_cost_factor: inColorMode ? DEFAULT_SWITCH_COST_FACTOR : 0,
   };
+}
+
+/**
+ * Allocate per-color line budgets so no single color monopolizes the
+ * solve. The shadow anchor (slot 0, typically black) gets a larger
+ * share since it drives luminance contrast; chromatic slots split
+ * the remainder evenly. `0` entries mean uncapped — used for
+ * single-color palettes so the solver behaves identically to the
+ * legacy mono path.
+ */
+export function deriveColorBudgets(
+  palette: readonly string[],
+  lineBudget: number,
+): Uint32Array {
+  if (palette.length <= 1) {
+    return new Uint32Array();
+  }
+  const total = Math.max(lineBudget, palette.length);
+  const shadowShare = 0.4;
+  const shadow = Math.round(total * shadowShare);
+  const remaining = Math.max(total - shadow, palette.length - 1);
+  const perChromatic = Math.floor(remaining / (palette.length - 1));
+  const budgets = new Uint32Array(palette.length);
+  budgets[0] = shadow;
+  for (let i = 1; i < palette.length; i += 1) {
+    budgets[i] = perChromatic;
+  }
+  return budgets;
 }
 
 /** Approximate total thread length in meters for a given plan. */

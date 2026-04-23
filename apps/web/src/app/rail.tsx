@@ -12,6 +12,7 @@ import {
   threadCoverage,
 } from "@/solver/physics";
 import { Slider } from "@/components/slider";
+import { PalettePicker } from "@/app/components/palette-picker";
 
 export function ParameterRail() {
   const imageStatus = useImageStore((s) => s.status);
@@ -106,6 +107,8 @@ export function ParameterRail() {
             suffix={`${physical.lineBudget.toLocaleString()}`}
             disabled={running}
           />
+
+          <PalettePicker />
 
           <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-[11px] tabular-nums text-muted">
             <dt>thread</dt>

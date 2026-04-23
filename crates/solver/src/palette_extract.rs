@@ -30,10 +30,30 @@ const SAMPLE_DIM: usize = 96;
 const MAX_K: usize = 8;
 
 /// OKLab chroma below this value is treated as "muddy" — not a
-/// productive thread color on a cream substrate. Empirically
-/// calibrated: warm-neutral skin centroids from photos typically
-/// land around 0.03–0.05; saturated primaries sit at 0.1–0.3.
-const MUDDY_CHROMA_THRESHOLD: f32 = 0.045;
+/// productive thread color on a cream substrate. A brown or
+/// desaturated skin-tone sits at ~0.04–0.08 chroma; saturated
+/// primaries at ~0.12–0.30. Cream board + low-chroma thread looks
+/// indistinguishable from cream board alone at viewing distance,
+/// so we aggressively reject anything below saturated-primary
+/// territory and push centroids outward if the cluster is warm but
+/// unsaturated.
+const MUDDY_CHROMA_THRESHOLD: f32 = 0.10;
+
+/// When a raw k-means centroid is below `MUDDY_CHROMA_THRESHOLD`,
+/// we try to "saturate" it by multiplying its (a, b) components by
+/// this factor and keeping the original L. If the boosted result
+/// still falls below threshold, the centroid is dropped.
+const CHROMA_BOOST_FACTOR: f32 = 1.8;
+
+/// Minimum OKLab distance between two chromatic centroids for them
+/// to be considered distinct. Below this, a candidate is rejected
+/// as too close to an already-selected color — this is what
+/// produces a gamut-diverse palette instead of three shades of
+/// skin-tone brown. Empirically calibrated: ~0.12 is the smallest
+/// perceptual gap a viewer can reliably distinguish on cream board
+/// at Vrellis crossing densities; we enforce 0.18 so the palette
+/// actually spans the wheel.
+const GAMUT_DIVERSITY_MIN: f32 = 0.18;
 
 /// Centroids brighter than `BOARD_LUMINANCE * BOARD_LIGHT_CAP_RATIO`
 /// are rejected — a thread lighter than the cream board can't darken
@@ -121,33 +141,81 @@ pub fn extract_palette_bytes(
         .collect();
 
     let target_chromatic = k - 1;
-    let chromatic: Vec<[u8; 3]> = if chromatic_samples.is_empty() {
+    // Candidate pool = image-saturated rim samples + canonical thread
+    // primaries. Canonical primaries ensure gamut coverage even when
+    // an image sits in one hue lane (e.g. a warm portrait); image
+    // samples let genuinely image-derived colors compete.
+    let mut candidates = image_saturated_candidates(&chromatic_samples, target_chromatic * 3, seed);
+    for primary in CANONICAL_PRIMARIES.iter().skip(1) {
+        let lab = linear_to_oklab(srgb_bytes_to_linear(*primary));
+        if oklab_chroma(lab) >= MUDDY_CHROMA_THRESHOLD {
+            candidates.push(lab);
+        }
+    }
+    let chromatic: Vec<[f32; 3]> = if candidates.is_empty() {
         Vec::new()
     } else {
-        oklab_kmeans_with_muddy_rejection(&chromatic_samples, target_chromatic, seed)
-            .into_iter()
-            .map(oklab_to_srgb_bytes_clamped)
-            .collect()
+        gamut_diverse_maxmin(&candidates, &chromatic_samples, target_chromatic)
     };
+
+    let mut picks_oklab: Vec<[f32; 3]> = Vec::with_capacity(k);
+    picks_oklab.push(linear_to_oklab(srgb_bytes_to_linear(BLACK_SRGB)));
 
     let mut picks: Vec<[u8; 3]> = Vec::with_capacity(k);
     picks.push(BLACK_SRGB);
-    for c in chromatic.iter().take(target_chromatic) {
-        if !picks.iter().any(|p| srgb_bytes_similar(*p, *c)) {
-            picks.push(*c);
+    for candidate in &chromatic {
+        if picks.len() >= k {
+            break;
         }
+        let bytes = oklab_to_srgb_bytes_clamped(*candidate);
+        if picks.iter().any(|p| srgb_bytes_similar(*p, bytes)) {
+            continue;
+        }
+        picks.push(bytes);
+        picks_oklab.push(*candidate);
     }
 
-    // If k-means undersupplied (muddy image, rejections, dedupe),
-    // top up from the canonical primary ranker.
+    // If maxmin selection undersupplied (greyscale image, all samples
+    // muddy), top up from the canonical primary ranker so we always
+    // reach the requested palette size. The ranker's vocabulary is
+    // saturated by construction; we still enforce gamut diversity
+    // unless we're nearly empty, in which case we pad any canonical
+    // primary rather than failing.
     if picks.len() < k {
         let fallback = primary_fallback_palette(&samples, k, &picks);
+        let strict_diversity = picks.len() > 1;
         for c in fallback {
             if picks.len() >= k {
                 break;
             }
-            if !picks.iter().any(|p| srgb_bytes_similar(*p, c)) {
-                picks.push(c);
+            if picks.iter().any(|p| srgb_bytes_similar(*p, c)) {
+                continue;
+            }
+            let cand = linear_to_oklab(srgb_bytes_to_linear(c));
+            if strict_diversity
+                && picks_oklab
+                    .iter()
+                    .any(|existing| oklab_distance(existing, &cand) < GAMUT_DIVERSITY_MIN)
+            {
+                continue;
+            }
+            picks.push(c);
+            picks_oklab.push(cand);
+        }
+
+        // Last-ditch pad: if still short (e.g. very short fallback
+        // list for a greyscale image), drop the diversity constraint
+        // and fill from the canonical vocabulary.
+        if picks.len() < k {
+            for primary in CANONICAL_PRIMARIES.iter() {
+                if picks.len() >= k {
+                    break;
+                }
+                if picks.iter().any(|p| srgb_bytes_similar(*p, *primary)) {
+                    continue;
+                }
+                picks.push(*primary);
+                picks_oklab.push(linear_to_oklab(srgb_bytes_to_linear(*primary)));
             }
         }
     }
@@ -320,34 +388,127 @@ fn face_weight(
     }
 }
 
-/// Weighted OKLab k-means with k-means++ seeding and muddy-centroid
-/// rejection. Returns up to `k` chromatic centroids. If a clustering
-/// pass produces a muddy centroid, it's dropped and the pass reruns
-/// for `k-1`. Bottoms out at `k=0` if no chromatic content exists.
-fn oklab_kmeans_with_muddy_rejection(
+/// Extract saturated-rim OKLab candidates from the image's chromatic
+/// samples by clustering, then replacing each centroid with the
+/// highest-chroma sample in its cluster (plus a saturation boost for
+/// any that still land in the muddy middle). These are the
+/// image-derived candidates; `gamut_diverse_maxmin` merges them with
+/// canonical primaries for the final palette pick.
+fn image_saturated_candidates(
     samples: &[WeightedLab],
-    k: usize,
+    cluster_count: usize,
     seed: u64,
 ) -> Vec<[f32; 3]> {
-    if k == 0 || samples.is_empty() {
+    if cluster_count == 0 || samples.is_empty() {
         return Vec::new();
     }
-    let mut remaining = k;
-    while remaining > 0 {
-        let centroids = oklab_kmeans(samples, remaining, seed);
-        let survivors: Vec<[f32; 3]> = centroids
-            .into_iter()
-            .filter(|c| oklab_chroma(*c) >= MUDDY_CHROMA_THRESHOLD && !too_light_for_board(*c))
-            .collect();
-        if survivors.len() == remaining {
-            return survivors;
+    let actual_k = cluster_count.min(samples.len()).max(1);
+    let centroids = oklab_kmeans(samples, actual_k, seed);
+    let mut out = Vec::with_capacity(actual_k);
+    for centroid in &centroids {
+        let mut best: Option<[f32; 3]> = None;
+        let mut best_chroma = -1.0f32;
+        for s in samples {
+            if oklab_distance(&s.oklab, centroid) > 0.12 {
+                continue;
+            }
+            let c = oklab_chroma(s.oklab);
+            if c > best_chroma {
+                best_chroma = c;
+                best = Some(s.oklab);
+            }
         }
-        // At least one centroid was muddy or too close to the board
-        // luminance. Drop one slot and try again — the rejected region
-        // gets absorbed into other clusters or left unexplained.
-        remaining = remaining.saturating_sub(1);
+        let pick = best.unwrap_or(*centroid);
+        let boosted = if oklab_chroma(pick) < MUDDY_CHROMA_THRESHOLD {
+            [
+                pick[0],
+                pick[1] * CHROMA_BOOST_FACTOR,
+                pick[2] * CHROMA_BOOST_FACTOR,
+            ]
+        } else {
+            pick
+        };
+        if oklab_chroma(boosted) >= MUDDY_CHROMA_THRESHOLD && !too_light_for_board(boosted) {
+            out.push(boosted);
+        }
     }
-    Vec::new()
+    out
+}
+
+/// Greedy maxmin pick from a candidate pool. Starts with the highest-
+/// chroma candidate and iteratively adds the one whose minimum OKLab
+/// distance to already-chosen candidates is largest, tie-broken by
+/// how much image-saliency-mass it would absorb. Produces a pairwise-
+/// diverse palette that spans the color wheel even on monochromatic
+/// images, because the canonical-primary half of the pool always
+/// supplies a cool option when the image has none.
+fn gamut_diverse_maxmin(
+    candidates: &[[f32; 3]],
+    samples: &[WeightedLab],
+    k: usize,
+) -> Vec<[f32; 3]> {
+    if k == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+    // Precompute per-candidate saliency match score: the saliency-
+    // weighted count of image samples closer to this candidate than
+    // any other. Candidates the image "wants" get a boost.
+    let saliency_scores: Vec<f32> = candidates
+        .iter()
+        .map(|c| {
+            let mut score = 0.0f32;
+            for s in samples {
+                let d = oklab_distance(&s.oklab, c);
+                if d < 0.12 {
+                    score += s.weight * (0.12 - d);
+                }
+            }
+            score
+        })
+        .collect();
+
+    // Seed with the highest-chroma candidate that also has some
+    // saliency attraction — pushes the first pick toward the
+    // image's dominant chromatic direction instead of an arbitrary
+    // canonical primary.
+    let mut seed_idx = 0usize;
+    let mut seed_score = f32::NEG_INFINITY;
+    for (i, c) in candidates.iter().enumerate() {
+        let sc = oklab_chroma(*c) + saliency_scores[i] * 0.3;
+        if sc > seed_score {
+            seed_score = sc;
+            seed_idx = i;
+        }
+    }
+    let mut remaining: Vec<usize> = (0..candidates.len()).collect();
+    remaining.swap_remove(remaining.iter().position(|&i| i == seed_idx).unwrap());
+    let mut chosen: Vec<[f32; 3]> = vec![candidates[seed_idx]];
+
+    while chosen.len() < k && !remaining.is_empty() {
+        let mut best_pos: Option<usize> = None;
+        let mut best_score = -1.0f32;
+        for (pos, &i) in remaining.iter().enumerate() {
+            let c = &candidates[i];
+            let min_d = chosen
+                .iter()
+                .map(|ex| oklab_distance(ex, c))
+                .fold(f32::INFINITY, f32::min);
+            if min_d < GAMUT_DIVERSITY_MIN {
+                continue;
+            }
+            // Score: minimum distance (gamut spread) dominates;
+            // saliency and chroma break ties.
+            let score = min_d + 0.15 * oklab_chroma(*c) + 0.08 * saliency_scores[i];
+            if score > best_score {
+                best_score = score;
+                best_pos = Some(pos);
+            }
+        }
+        let Some(pos) = best_pos else { break };
+        let idx = remaining.swap_remove(pos);
+        chosen.push(candidates[idx]);
+    }
+    chosen
 }
 
 fn too_light_for_board(oklab: [f32; 3]) -> bool {
@@ -712,17 +873,26 @@ mod tests {
     }
 
     #[test]
-    fn warm_image_picks_warm_primaries_over_cool() {
+    fn warm_image_includes_warm_primary() {
+        // Gamut-diverse selection intentionally spans the wheel, so a
+        // warm image's palette will include both warm picks (matching
+        // the image's content) and cool picks (for gamut diversity,
+        // e.g. shadows/background). What we guarantee: at least one
+        // non-black pick is warm-leaning for a warm image, so the
+        // image's dominant hue is represented.
         let size = 96;
         let rgba = rgb_image(size, |_, _| [220, 160, 100]);
         let out = extract_palette_bytes(&rgba, size, 4, 0, None).unwrap();
         let hexes: Vec<[u8; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-        for c in &hexes {
-            if *c == BLACK_SRGB {
-                continue;
-            }
-            assert!(c[0] >= c[2], "unexpected cool primary in warm image: {c:?}");
-        }
+        let non_black: Vec<[u8; 3]> = hexes.iter().copied().filter(|c| *c != BLACK_SRGB).collect();
+        assert!(
+            !non_black.is_empty(),
+            "palette must include at least one chromatic color"
+        );
+        assert!(
+            non_black.iter().any(|c| c[0] > c[2]),
+            "no warm primary picked for a warm image: {non_black:?}"
+        );
     }
 
     #[test]
