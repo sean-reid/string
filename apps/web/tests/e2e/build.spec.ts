@@ -109,9 +109,9 @@ test.describe("build guide", () => {
   test("Header shows thread color indicator", async ({ page }) => {
     test.setTimeout(90_000);
     await primeAndNavigate(page);
-    const swatch = page.getByLabel("Thread color");
+    const swatch = page.getByLabel("Thread colors");
     await expect(swatch).toBeVisible();
-    await expect(swatch).toContainText(/black thread/i);
+    await expect(swatch).toContainText(/(one|\d+) threads? on cream board/i);
   });
 
   test("Printables buttons render under Materials tab", async ({ page }) => {
