@@ -261,7 +261,7 @@ export function ColorPickerPopover({
         aria-label="Saturation and value"
         aria-valuenow={Math.round(hsv.s * 100)}
         tabIndex={0}
-        className="relative h-32 w-full cursor-crosshair overflow-hidden rounded border border-line"
+        className="relative h-32 w-full cursor-crosshair touch-none select-none overflow-hidden rounded border border-line"
         style={{
           backgroundColor: pureHue,
           backgroundImage:
@@ -293,7 +293,7 @@ export function ColorPickerPopover({
         aria-label="Hue"
         aria-valuenow={Math.round(hsv.h)}
         tabIndex={0}
-        className="relative h-4 w-full cursor-ew-resize rounded border border-line"
+        className="relative h-4 w-full cursor-ew-resize touch-none select-none rounded border border-line"
         style={{
           backgroundImage:
             "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",

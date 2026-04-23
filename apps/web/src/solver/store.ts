@@ -115,18 +115,19 @@ const baseStoreFactory = (
           next.lineBudget = DEFAULT_PHYSICAL.lineBudget;
         }
         const paletteChanged = !arraysShallowEqual(prev.physical.palette, next.palette);
-        if (paletteChanged && (prev.status === "running" || prev.status === "done")) {
-          // Editing the palette makes the in-flight or just-finished
-          // solve stale — invalidate it so the user's next Generate
-          // runs against the new colors from scratch.
-          terminateSolverWorker();
+        if (paletteChanged && prev.status === "running") {
+          // First palette edit during a running solve cancels it —
+          // the remaining chords would reinforce the wrong color. We
+          // only bump `generationId` so the loop exits at its next
+          // check; `start()` always terminates + recreates the
+          // worker on the next Generate, so we don't need to tear it
+          // down here. Doing so on every pointer frame during a
+          // swatch-picker drag is what produced mobile-picker jitter.
+          // Subsequent drag events find status="cancelled" and skip.
           return {
             physical: next,
             generationId: prev.generationId + 1,
-            status: prev.status === "running" ? ("cancelled" as SolverStatus) : prev.status,
-            sequence: prev.status === "running" ? [] : prev.sequence,
-            sequenceColors: prev.status === "running" ? [] : prev.sequenceColors,
-            linesDrawn: prev.status === "running" ? 0 : prev.linesDrawn,
+            status: "cancelled" as SolverStatus,
           };
         }
       }
