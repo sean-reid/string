@@ -86,6 +86,7 @@ export async function buildBookletPdf(input: Input): Promise<Uint8Array> {
       const x = MARGIN_PT + col * (colWidthPt + COL_GAP_PT);
       const y = contentTop - rowInCol * ROW_HEIGHT_PT - ROW_HEIGHT_PT;
       const colorIdx = sequenceColors[step] ?? 0;
+      const isBreak = colorIdx < 0;
       drawCell(page, {
         x,
         y,
@@ -94,7 +95,8 @@ export async function buildBookletPdf(input: Input): Promise<Uint8Array> {
         nail: sequence[step] ?? 0,
         font,
         bold,
-        swatch: multiColor ? paletteColors[colorIdx] ?? null : null,
+        swatch: multiColor && !isBreak ? paletteColors[colorIdx] ?? null : null,
+        isBreak,
       });
     }
   }
@@ -153,6 +155,7 @@ function drawLegendPage(
 
   const counts = palette.map(() => 0);
   for (const c of sequenceColors) {
+    if (c < 0) continue;
     if (c < counts.length) counts[c] = (counts[c] ?? 0) + 1;
   }
 
@@ -253,9 +256,10 @@ function drawCell(
     font: PDFFont;
     bold: PDFFont;
     swatch: RGB | null;
+    isBreak?: boolean;
   },
 ) {
-  const { x, y, width, step, nail, font, bold, swatch } = args;
+  const { x, y, width, step, nail, font, bold, swatch, isBreak } = args;
   const ink = rgb(0.08, 0.07, 0.06);
   const muted = rgb(0.45, 0.43, 0.4);
 
@@ -277,6 +281,28 @@ function drawCell(
     font,
     color: muted,
   });
+
+  if (isBreak) {
+    // Break rows mark a thread cut — the builder finishes the
+    // previous run, ties off, and restarts at the nail number
+    // shown. The step still counts so the booklet's numbering
+    // stays a 1:1 map with `sequence`.
+    page.drawText("cut · restart at", {
+      x: x + 60,
+      y: y + 3,
+      size: 9,
+      font,
+      color: muted,
+    });
+    page.drawText(String(nail).padStart(3, "0"), {
+      x: x + 132,
+      y: y + 3,
+      size: 11,
+      font: bold,
+      color: ink,
+    });
+    return;
+  }
 
   // Nail number (bold)
   const nailStr = String(nail).padStart(3, "0");

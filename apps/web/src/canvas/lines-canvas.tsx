@@ -114,6 +114,12 @@ export function LinesCanvas() {
         continue;
       }
       const color = sequenceColors[i] ?? 0;
+      // Break markers from regrouped sequences: skip the connector.
+      if (color < 0) {
+        flush();
+        activeColor = null;
+        continue;
+      }
       if (color !== activeColor) {
         flush();
         ctx.strokeStyle = palette[color] ?? FALLBACK_COLOR;

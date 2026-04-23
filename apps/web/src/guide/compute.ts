@@ -71,6 +71,10 @@ function chordLengths(
     const from = sequence[i - 1];
     const to = sequence[i];
     if (from === undefined || to === undefined) continue;
+    const color = sequenceColors[i] ?? 0;
+    // Break markers from regrouped sequences aren't real chords — no
+    // thread is used, no length contributed.
+    if (color < 0) continue;
     const fx = pinPositions[from * 2];
     const fy = pinPositions[from * 2 + 1];
     const tx = pinPositions[to * 2];
@@ -86,7 +90,6 @@ function chordLengths(
     const dy = (ty - fy) * scale;
     const len = Math.sqrt(dx * dx + dy * dy);
     total += len;
-    const color = sequenceColors[i] ?? 0;
     const slot = color < paletteLength ? color : 0;
     byColor[slot] = (byColor[slot] ?? 0) + len;
     lineCountByColor[slot] = (lineCountByColor[slot] ?? 0) + 1;

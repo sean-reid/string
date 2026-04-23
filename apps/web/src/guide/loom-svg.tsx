@@ -70,6 +70,13 @@ export function LoomSvg({
       )
         continue;
       const color = sequenceColors?.[i] ?? 0;
+      // BREAK_COLOR (-1) marks a thread-cut jump between disjoint
+      // Eulerian walks; don't draw a connecting stroke there.
+      if (color < 0) {
+        flush();
+        currentColor = -1;
+        continue;
+      }
       if (color !== currentColor) {
         flush();
         currentColor = color;
