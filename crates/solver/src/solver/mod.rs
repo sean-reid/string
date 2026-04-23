@@ -1,42 +1,55 @@
 //! Stochastic greedy string-art solver with two code paths.
 //!
-//! **Mono** (palette length 1): the legacy scalar-luminance additive
-//! model. Residual is "brightness still needed" per pixel; each drawn
-//! line subtracts `opacity · coverage` from the residual; score is the
+//! **Mono** (palette length 1): scalar-luminance additive model.
+//! Residual is "brightness still needed" per pixel; each drawn line
+//! subtracts `opacity · coverage` from the residual; the score is the
 //! weighted residual along the chord. A line drawn on a pixel already
-//! at zero residual still gets counted (it just doesn't subtract more),
-//! which keeps lines accumulating visual density even once the canvas
-//! has reached the target. This produces the sharp, dense portrait the
-//! original solver was tuned for.
+//! at zero residual still gets counted (it just doesn't subtract
+//! more), which keeps lines accumulating visual density even once the
+//! canvas has reached the target. This produces the sharp, dense
+//! portrait the original mono solver was tuned for.
 //!
-//! **Color** (palette length > 1): same scalar-luminance greedy as
-//! mono, with a per-chord thread selection on top. Chord scoring
-//! uses one scalar residual ("darkness still needed" in Rec.709 terms)
-//! — identical to mono. Once a chord is chosen, we walk its pixels,
-//! sum the target-minus-board direction along the path, and pick
-//! the palette thread whose darkening direction best aligns with
-//! that average — so a chord through a warm region gets a warm
-//! thread, a chord through hair gets black, etc. Deposit subtracts
-//! `opacity · thread_luminance · coverage` from the scalar residual,
-//! because a darker thread darkens more per crossing than a lighter
-//! one.
+//! **Color** (palette length > 1): 3-channel linear-RGB model with a
+//! joint-greedy score over `(pin, color)` pairs. State:
 //!
-//! This follows Petros Vrellis's original algorithm structure
-//! (kmmeerts reference): luminance greedy first, color as a
-//! classification on top, instead of K parallel per-thread
-//! residuals. The single-residual structure is what produces sharp
-//! feature recognition and avoids moiré — the scoring signal is
-//! unambiguous, every chord has exactly one "value", and near-ties
-//! that would otherwise fragment into parallel-chord bundles don't
-//! happen.
+//! - `target`: pre-baked target in linear RGB, clipped per-channel at
+//!   the cream-board brightness (brighter-than-board pixels stay
+//!   bare).
+//! - `canvas`: the current simulated canvas in linear RGB, initialized
+//!   to the board color. Each chord alpha-composites its thread color
+//!   onto every pixel it touches.
+//! - `delta = max(canvas - target, 0)`: darkening demand still
+//!   outstanding per pixel, per channel. Maintained alongside canvas
+//!   so the hot-loop score only reads one buffer.
+//! - `thread_basis[k] = board - color_k`: each thread's darkening
+//!   direction in linear RGB.
 //!
-//! Regrouping for the physical build is done post-hoc in the UI so
-//! the builder still switches spools rarely.
+//! For a candidate chord `(current → j)`, the solver walks the chord
+//! once and accumulates the saliency-weighted mean delta vector
+//! `acc = avg_chord(W · delta)`. For each palette color `k`, the
+//! score is `acc · thread_basis[k]` — the projection of remaining
+//! demand onto that thread's darkening direction. The winning
+//! `(pin_j, color_k)` pair is sampled via the same softmax /
+//! temperature-annealing schedule mono uses.
+//!
+//! This is the joint-greedy formulation from Birsak 2018 / Hachnochi
+//! 2025: one shared chord geometry across all K colors (the chord
+//! walk cost is amortized over K), and a projection onto per-color
+//! bases that discriminates a red-demand region from a green-demand
+//! region even at equal luminance. Unlike the earlier scalar-
+//! luminance-plus-post-hoc-classification path, it cannot be fooled
+//! into picking a green thread for a red chord just because the
+//! chord's average linear-RGB target happens to sit equidistant from
+//! both.
+//!
+//! Regrouping the interleaved output into per-color runs for the
+//! physical build is done post-hoc in the UI.
 //!
 //! State machine the front-end polls:
-//!   1. `new` allocates residual or canvas+target based on palette size.
-//!   2. `step_many(n)` picks up to `n` next pins. Color mode emits the
-//!      palette index chosen for each pin alongside it.
+//!   1. `new` allocates the Mono residual or the Color (target,
+//!      canvas, delta, basis) tuple based on palette size.
+//!   2. `step_many(n)` picks up to `n` next pins. Color mode emits
+//!      the palette index chosen for each pin alongside it.
 //!   3. `is_done()` flips true when the total line budget is reached.
 
 pub mod chord;
@@ -53,10 +66,9 @@ use self::weight::{with_face_emphasis, FaceBox};
 
 /// Linear-RGB color of the bare (light cream fabric) board the threads
 /// sit on. Vrellis / kmmeerts convention: bright canvas, dark threads
-/// that subtract light via partial occlusion. Each crossing darkens the
-/// pixel toward the thread color; bare board stays cream where no chord
-/// passes. Threads are all **darker** than the board by design; palette
-/// extraction rejects samples near or above board brightness.
+/// that subtract light via partial occlusion. Each crossing darkens
+/// the pixel toward the thread color; bare board stays cream where no
+/// chord passes. Threads are all **darker** than the board by design.
 const BOARD_LINEAR: LinearRgb = [
     // #f4efe5 converted to linear sRGB (gamma 2.4 piecewise).
     0.904_587_8_f32,
@@ -64,9 +76,8 @@ const BOARD_LINEAR: LinearRgb = [
     0.784_452_6_f32,
 ];
 
-/// Rec.709 luminance of the board, precomputed for palette eligibility
-/// filters ("is this thread meaningfully darker than the board?") and
-/// luminance residual init.
+/// Rec.709 luminance of the board, precomputed for mono residual init
+/// and palette eligibility filters.
 const BOARD_LUMINANCE: f32 = 0.2126 * 0.904_587_8 + 0.7152 * 0.862_741_3 + 0.0722 * 0.784_452_6;
 
 #[derive(Clone, Copy, Debug)]
@@ -94,42 +105,35 @@ impl Default for SolverConfig {
     }
 }
 
-/// Mode-specific solver state. Both modes use a scalar luminance
-/// residual for chord selection — one unambiguous signal, no
-/// per-thread complications. Color adds a target buffer so each
-/// selected chord can be tinted to the nearest palette hue.
+/// Mode-specific solver state. Mono keeps its legacy scalar
+/// luminance residual; Color uses a 3-channel linear-RGB target +
+/// canvas + delta triple plus pre-baked thread darkening bases.
 enum SolverState {
     Mono {
         /// Scalar "darkness still needed", length width * height.
         residual: Vec<f32>,
     },
     Color {
-        /// Scalar "darkness still needed" — identical shape and role
-        /// to mono's residual. Chord selection is driven purely by
-        /// this; color comes in after the chord is chosen.
-        residual: Vec<f32>,
-        /// Target `board − image` color per pixel, interleaved RGB in
-        /// linear light. Used by `pick_chord_color` to compute the
-        /// average target hue along a chosen chord, which maps to
-        /// the nearest palette thread.
-        target_offset: Vec<f32>,
-        /// Rec.709 luminance of each palette thread's darkening basis
-        /// (`board − thread_i`). How much darkness one crossing of
-        /// thread i contributes — used to subtract the right amount
-        /// from the scalar residual when a chord deposits.
-        thread_luminance: Vec<f32>,
-        /// Darkening basis `(board − thread_i)` in linear RGB, one per
-        /// palette entry. Pre-baked for chord color picking.
-        thread_basis: Vec<[f32; 3]>,
-        /// Alpha-composited preview canvas (display only).
+        /// Target linear-RGB per pixel, interleaved (length N*3).
+        /// Each channel is clipped at the board color so pixels
+        /// brighter than the cream substrate contribute no demand.
+        target: Vec<f32>,
+        /// Current canvas state in linear RGB, interleaved. Starts
+        /// at `BOARD_LINEAR` and accumulates alpha-over deposits
+        /// per chord.
         canvas: Vec<f32>,
+        /// `max(canvas - target, 0)` per channel, interleaved. The
+        /// joint-greedy score sums W·c·delta along a chord, then
+        /// projects the 3-vector onto each thread's darkening basis.
+        /// Maintained in lockstep with `canvas`.
+        delta: Vec<f32>,
+        /// Darkening basis `(board - thread_k)` in linear RGB,
+        /// pre-baked per palette entry. Score denominator `‖b_k‖²`
+        /// is swept into the linearized score (see docs above), so
+        /// it's not stored explicitly.
+        thread_basis: Vec<[f32; 3]>,
     },
 }
-
-/// Rec.709 luminance coefficients.
-const REC709_R: f32 = 0.2126;
-const REC709_G: f32 = 0.7152;
-const REC709_B: f32 = 0.0722;
 
 pub struct Solver {
     width: usize,
@@ -142,7 +146,7 @@ pub struct Solver {
     palette: Palette,
     mode: Mode,
     /// Palette index chosen for each pin emitted in the most recent
-    /// `step_many`. All-zero in mono; monotonic non-decreasing in color.
+    /// `step_many`. All-zero in mono.
     last_batch_colors: Vec<u8>,
     rng: ChaCha8Rng,
     current: u16,
@@ -182,9 +186,8 @@ impl Solver {
                 // preprocess emits R=G=B=luminance; residual is how
                 // much darker this pixel must become from the bare
                 // board to match the target. Clamped at zero for
-                // pixels brighter than or equal to board (those stay
-                // bare). Each thread chord subtracts
-                // `opacity · coverage` from the residual.
+                // pixels brighter than or equal to board. Each chord
+                // subtracts `opacity · coverage`.
                 let mut residual = Vec::with_capacity(pixel_count);
                 for i in 0..pixel_count {
                     let target_lum = preprocessed_rgba[i * 4] as f32 / 255.0;
@@ -193,14 +196,9 @@ impl Solver {
                 SolverState::Mono { residual }
             }
             Mode::Color => {
-                // Petros-style init: one scalar luminance residual
-                // (same shape as mono) plus a target-offset buffer
-                // used to pick the right thread color once a chord
-                // has been chosen. Chord selection is pure luminance
-                // greedy; color is a post-selection classification
-                // of the chord's average hue demand. Structurally
-                // identical to Vrellis's original algorithm with
-                // per-chord color tinting on top.
+                // 3-channel linear-RGB initialization. Target is
+                // clipped per-channel at the board color; canvas
+                // starts at board; delta = max(canvas - target, 0).
                 let thread_basis: Vec<[f32; 3]> = palette
                     .colors()
                     .iter()
@@ -212,41 +210,29 @@ impl Solver {
                         ]
                     })
                     .collect();
-                let thread_luminance: Vec<f32> = thread_basis
-                    .iter()
-                    .map(|c| REC709_R * c[0] + REC709_G * c[1] + REC709_B * c[2])
-                    .collect();
 
-                let mut residual = Vec::with_capacity(pixel_count);
-                let mut target_offset = Vec::with_capacity(pixel_count * 3);
-                for bgra in preprocessed_rgba.chunks_exact(4).take(pixel_count) {
-                    let tr = srgb_to_linear(bgra[0] as f32 / 255.0);
-                    let tg = srgb_to_linear(bgra[1] as f32 / 255.0);
-                    let tb = srgb_to_linear(bgra[2] as f32 / 255.0);
-                    // Board − target in linear light, clamped so
-                    // pixels brighter than board contribute nothing
-                    // (they stay bare cream).
-                    let dr = (BOARD_LINEAR[0] - tr).max(0.0);
-                    let dg = (BOARD_LINEAR[1] - tg).max(0.0);
-                    let db = (BOARD_LINEAR[2] - tb).max(0.0);
-                    residual.push(REC709_R * dr + REC709_G * dg + REC709_B * db);
-                    target_offset.push(dr);
-                    target_offset.push(dg);
-                    target_offset.push(db);
-                }
-
+                let mut target = Vec::with_capacity(pixel_count * 3);
                 let mut canvas = Vec::with_capacity(pixel_count * 3);
-                for _ in 0..pixel_count {
+                let mut delta = Vec::with_capacity(pixel_count * 3);
+                for bgra in preprocessed_rgba.chunks_exact(4).take(pixel_count) {
+                    let tr = srgb_to_linear(bgra[0] as f32 / 255.0).min(BOARD_LINEAR[0]);
+                    let tg = srgb_to_linear(bgra[1] as f32 / 255.0).min(BOARD_LINEAR[1]);
+                    let tb = srgb_to_linear(bgra[2] as f32 / 255.0).min(BOARD_LINEAR[2]);
+                    target.push(tr);
+                    target.push(tg);
+                    target.push(tb);
                     canvas.push(BOARD_LINEAR[0]);
                     canvas.push(BOARD_LINEAR[1]);
                     canvas.push(BOARD_LINEAR[2]);
+                    delta.push((BOARD_LINEAR[0] - tr).max(0.0));
+                    delta.push((BOARD_LINEAR[1] - tg).max(0.0));
+                    delta.push((BOARD_LINEAR[2] - tb).max(0.0));
                 }
                 SolverState::Color {
-                    residual,
-                    target_offset,
-                    thread_luminance,
-                    thread_basis,
+                    target,
                     canvas,
+                    delta,
+                    thread_basis,
                 }
             }
         };
@@ -321,12 +307,12 @@ impl Solver {
         d.min(n - d)
     }
 
-    /// Score every legal next-pin candidate. Both mono and color use
-    /// the same scalar-residual scoring: a chord is good if the
-    /// weighted sum of "darkness demand" along its path is large.
-    /// Color's per-chord thread assignment happens AFTER the chord is
-    /// chosen; it doesn't factor into scoring.
-    fn score_candidates(&self) -> Vec<(u16, f32)> {
+    /// Mono chord candidates, scored by weighted residual average
+    /// along the chord. One pin → one score.
+    fn score_candidates_mono(&self) -> Vec<(u16, f32)> {
+        let SolverState::Mono { residual } = &self.state else {
+            return Vec::new();
+        };
         let n = self.config.pin_count;
         let (cx, cy) = self.pin_position(self.current);
         let mut out = Vec::new();
@@ -338,10 +324,6 @@ impl Solver {
                 continue;
             }
             let (qx, qy) = self.pin_position(i);
-            let residual = match &self.state {
-                SolverState::Mono { residual } => residual,
-                SolverState::Color { residual, .. } => residual,
-            };
             let s = score_chord_scalar(
                 residual,
                 &self.weights,
@@ -355,19 +337,69 @@ impl Solver {
         out
     }
 
-    fn pick_next(&mut self) -> Option<u16> {
-        let candidates = self.score_candidates();
+    /// Color chord candidates, scored jointly over `(pin, color)`.
+    /// For each candidate pin we walk the chord once to accumulate
+    /// `acc = avg_{W,c}(delta)` (saliency-and-coverage-weighted mean
+    /// delta vector). Then for each palette color k the score is
+    /// `acc · thread_basis[k]` — projection of remaining demand onto
+    /// that thread's darkening direction. Chord rasterization is
+    /// amortized over all K colors.
+    fn score_candidates_color(&self) -> Vec<(u16, u8, f32)> {
+        let SolverState::Color {
+            delta,
+            thread_basis,
+            ..
+        } = &self.state
+        else {
+            return Vec::new();
+        };
+        let n = self.config.pin_count;
+        let (cx, cy) = self.pin_position(self.current);
+        let mut out = Vec::with_capacity((n as usize) * thread_basis.len());
+        for i in 0..n {
+            if i == self.current
+                || self.circular_distance(self.current, i) < self.config.min_chord_skip
+                || self.is_banned(i)
+            {
+                continue;
+            }
+            let (qx, qy) = self.pin_position(i);
+            let mut acc = [0.0f32; 3];
+            let mut wsum = 0.0f32;
+            chord::for_each_pixel(cx, cy, qx, qy, self.width, self.height, |idx, c| {
+                let w = self.weights[idx] * c;
+                let base = idx * 3;
+                acc[0] += w * delta[base];
+                acc[1] += w * delta[base + 1];
+                acc[2] += w * delta[base + 2];
+                wsum += w;
+            });
+            if wsum <= 1e-6 {
+                continue;
+            }
+            let inv = 1.0 / wsum;
+            acc[0] *= inv;
+            acc[1] *= inv;
+            acc[2] *= inv;
+            for (k, b) in thread_basis.iter().enumerate() {
+                let s = acc[0] * b[0] + acc[1] * b[1] + acc[2] * b[2];
+                out.push((i, k as u8, s));
+            }
+        }
+        out
+    }
+
+    /// Softmax-sample from a candidate list (mono variant: pin → score).
+    fn sample_mono(&mut self, candidates: &[(u16, f32)]) -> Option<u16> {
         if candidates.is_empty() {
             return None;
         }
-
         let mut best = f32::NEG_INFINITY;
-        for &(_, s) in &candidates {
+        for &(_, s) in candidates {
             if s > best {
                 best = s;
             }
         }
-
         let t = self.temperature().max(1e-6);
         let mut weights: Vec<f32> = candidates
             .iter()
@@ -388,7 +420,6 @@ impl Solver {
         for w in &mut weights {
             *w /= sum;
         }
-
         let r: f32 = self.rng.gen();
         let mut acc = 0.0f32;
         for (i, &w) in weights.iter().enumerate() {
@@ -400,65 +431,48 @@ impl Solver {
         Some(candidates.last().unwrap().0)
     }
 
-    /// For a chord chosen in color mode, pick the palette thread
-    /// whose color is closest to the chord's average target color
-    /// (squared distance in linear RGB).
-    ///
-    /// This is perceptual matching: "chord's average target is a
-    /// warm-skin color → pick the nearest warm thread; average is
-    /// near-black → pick black." Basis-alignment metrics got fooled
-    /// by black's large raw magnitude and either over- or
-    /// under-picked it; matching on thread *color* puts black at
-    /// the right squared-distance from any demand and lets colored
-    /// threads win only when they genuinely are the closest thread
-    /// to the chord's average hue.
-    fn pick_chord_color(
-        &self,
-        target_offset: &[f32],
-        thread_basis: &[[f32; 3]],
-        p0: (f32, f32),
-        p1: (f32, f32),
-    ) -> u8 {
-        let mut sum = [0.0f32; 3];
-        let mut weight = 0.0f32;
-        chord::for_each_pixel(p0.0, p0.1, p1.0, p1.1, self.width, self.height, |idx, c| {
-            let w = self.weights[idx];
-            let cw = c * w;
-            let base = idx * 3;
-            sum[0] += target_offset[base] * cw;
-            sum[1] += target_offset[base + 1] * cw;
-            sum[2] += target_offset[base + 2] * cw;
-            weight += cw;
-        });
-        if weight <= 1e-6 {
-            return 0;
+    /// Softmax-sample from a candidate list (color variant:
+    /// `(pin, color)` pairs → score). Returns `(pin, color_index)`.
+    fn sample_color(&mut self, candidates: &[(u16, u8, f32)]) -> Option<(u16, u8)> {
+        if candidates.is_empty() {
+            return None;
         }
-        // Average target color along the chord in linear RGB.
-        // target = board − target_offset, so avg_target = board − avg_offset.
-        let avg_target = [
-            BOARD_LINEAR[0] - sum[0] / weight,
-            BOARD_LINEAR[1] - sum[1] / weight,
-            BOARD_LINEAR[2] - sum[2] / weight,
-        ];
-
-        // Closest-thread-in-linear-RGB search.
-        let mut best = 0u8;
-        let mut best_dist = f32::INFINITY;
-        for (i, basis) in thread_basis.iter().enumerate() {
-            // thread color = board − basis.
-            let tr = BOARD_LINEAR[0] - basis[0];
-            let tg = BOARD_LINEAR[1] - basis[1];
-            let tb = BOARD_LINEAR[2] - basis[2];
-            let dr = avg_target[0] - tr;
-            let dg = avg_target[1] - tg;
-            let db = avg_target[2] - tb;
-            let dist = dr * dr + dg * dg + db * db;
-            if dist < best_dist {
-                best_dist = dist;
-                best = i as u8;
+        let mut best = f32::NEG_INFINITY;
+        for &(_, _, s) in candidates {
+            if s > best {
+                best = s;
             }
         }
-        best
+        let t = self.temperature().max(1e-6);
+        let mut weights: Vec<f32> = candidates
+            .iter()
+            .map(|&(_, _, s)| ((s - best) / t).exp())
+            .collect();
+        let sum: f32 = weights.iter().sum();
+        if sum <= 0.0 || !sum.is_finite() {
+            let mut idx = 0usize;
+            let mut bv = f32::NEG_INFINITY;
+            for (i, &(_, _, s)) in candidates.iter().enumerate() {
+                if s > bv {
+                    bv = s;
+                    idx = i;
+                }
+            }
+            return Some((candidates[idx].0, candidates[idx].1));
+        }
+        for w in &mut weights {
+            *w /= sum;
+        }
+        let r: f32 = self.rng.gen();
+        let mut acc = 0.0f32;
+        for (i, &w) in weights.iter().enumerate() {
+            acc += w;
+            if r <= acc {
+                return Some((candidates[i].0, candidates[i].1));
+            }
+        }
+        let last = candidates.last().unwrap();
+        Some((last.0, last.1))
     }
 
     pub fn step_many(&mut self, max: u32) -> Vec<u16> {
@@ -468,8 +482,21 @@ impl Solver {
             if self.is_done() {
                 break;
             }
-            let Some(next) = self.pick_next() else {
-                break;
+            let (next, color_index) = match self.mode {
+                Mode::Mono => {
+                    let cands = self.score_candidates_mono();
+                    let Some(pin) = self.sample_mono(&cands) else {
+                        break;
+                    };
+                    (pin, 0u8)
+                }
+                Mode::Color => {
+                    let cands = self.score_candidates_color();
+                    let Some((pin, k)) = self.sample_color(&cands) else {
+                        break;
+                    };
+                    (pin, k)
+                }
             };
             let (cx, cy) = self.pin_position(self.current);
             let (qx, qy) = self.pin_position(next);
@@ -478,18 +505,6 @@ impl Solver {
                 y0: cy,
                 x1: qx,
                 y1: qy,
-            };
-            // Pick the chord's thread color (color mode only) BEFORE
-            // depositing, so the deposit subtracts this thread's
-            // actual darkening contribution — not a generic
-            // placeholder.
-            let color_index: u8 = match &self.state {
-                SolverState::Mono { .. } => 0,
-                SolverState::Color {
-                    target_offset,
-                    thread_basis,
-                    ..
-                } => self.pick_chord_color(target_offset, thread_basis, (cx, cy), (qx, qy)),
             };
             match &mut self.state {
                 SolverState::Mono { residual } => {
@@ -502,32 +517,16 @@ impl Solver {
                     );
                 }
                 SolverState::Color {
-                    residual,
-                    thread_luminance,
+                    target,
                     canvas,
+                    delta,
                     ..
                 } => {
-                    // Residual loses this thread's luminance
-                    // contribution per crossing. A low-luminance
-                    // thread (black-on-cream) subtracts a lot per
-                    // crossing; a brighter thread subtracts less,
-                    // needing more crossings to darken the same
-                    // amount. Matches the physical opacity the
-                    // lines-canvas renders.
-                    let idx = color_index as usize;
-                    deposit_mono(
-                        residual,
-                        self.width,
-                        self.height,
-                        endpoints,
-                        self.config.opacity * thread_luminance[idx],
-                    );
-                    // Preview canvas: alpha composite toward the
-                    // chosen thread color, matching what the
-                    // physical build looks like at this crossing.
-                    let thread = self.palette.colors()[idx];
-                    deposit_alpha(
+                    let thread = self.palette.colors()[color_index as usize];
+                    deposit_color(
                         canvas,
+                        delta,
+                        target,
                         self.width,
                         self.height,
                         endpoints,
@@ -552,9 +551,7 @@ impl Solver {
 
 /// Per-chord score for a scalar residual field: weighted average of
 /// `residual × coverage × weight` along the chord, normalized by
-/// weighted coverage. Used by both mono and color modes — color also
-/// scores on a scalar luminance residual, just with extra bookkeeping
-/// to pick a thread color for the winning chord.
+/// weighted coverage. Mono only.
 fn score_chord_scalar(
     residual: &[f32],
     weights: &[f32],
@@ -579,21 +576,22 @@ fn score_chord_scalar(
 
 /// Mono-mode deposit: subtract `opacity · coverage` from the residual
 /// at each touched pixel, clamping at zero. Over-draws on a saturated
-/// pixel don't undershoot but still count toward the line budget —
-/// that "over-coverage" is the physical reality the solver is tuned
-/// for and it keeps density in already-bright regions.
+/// pixel don't undershoot but still count toward the line budget.
 fn deposit_mono(residual: &mut [f32], width: usize, height: usize, e: Endpoints, opacity: f32) {
     chord::for_each_pixel(e.x0, e.y0, e.x1, e.y1, width, height, |idx, c| {
         residual[idx] = (residual[idx] - opacity * c).max(0.0);
     });
 }
 
-/// Alpha-composite a thread onto the canvas along a chord. Each touched
-/// pixel updates as `canvas += k · (thread - canvas)` where
-/// `k = opacity · coverage`. Pixels already at the thread color
-/// saturate naturally.
-fn deposit_alpha(
+/// Color-mode deposit: alpha-over in linear RGB updates `canvas`
+/// toward the thread color by `k = opacity · coverage` at each
+/// touched pixel, and refreshes `delta = max(canvas - target, 0)` in
+/// the same pass. One chord walk per deposit.
+#[allow(clippy::too_many_arguments)]
+fn deposit_color(
     canvas: &mut [f32],
+    delta: &mut [f32],
+    target: &[f32],
     width: usize,
     height: usize,
     e: Endpoints,
@@ -603,9 +601,15 @@ fn deposit_alpha(
     chord::for_each_pixel(e.x0, e.y0, e.x1, e.y1, width, height, |idx, cov| {
         let base = idx * 3;
         let k = opacity * cov;
-        canvas[base] += k * (thread[0] - canvas[base]);
-        canvas[base + 1] += k * (thread[1] - canvas[base + 1]);
-        canvas[base + 2] += k * (thread[2] - canvas[base + 2]);
+        let c0 = canvas[base] + k * (thread[0] - canvas[base]);
+        let c1 = canvas[base + 1] + k * (thread[1] - canvas[base + 1]);
+        let c2 = canvas[base + 2] + k * (thread[2] - canvas[base + 2]);
+        canvas[base] = c0;
+        canvas[base + 1] = c1;
+        canvas[base + 2] = c2;
+        delta[base] = (c0 - target[base]).max(0.0);
+        delta[base + 1] = (c1 - target[base + 1]).max(0.0);
+        delta[base + 2] = (c2 - target[base + 2]).max(0.0);
     });
 }
 
@@ -709,16 +713,66 @@ mod tests {
         assert_ne!(run(7), run(11), "different seeds should differ");
     }
 
+    /// Golden test: mono output is deterministic for a fixed seed + image.
+    /// The pre-3ch-color refactor must not shift mono behavior by even one
+    /// pin — mono takes a dedicated `score_candidates_mono` path that is
+    /// byte-identical to the previous implementation.
     #[test]
-    fn alpha_deposit_pulls_canvas_toward_thread_color() {
-        // A single red deposit at k=0.5 on a black canvas should leave
-        // the touched pixels halfway between board and red in R, and
-        // almost unchanged in G and B (alpha compositing is per-channel).
+    fn mono_golden_sequence_is_deterministic() {
+        let size = 64usize;
+        let rgba = rgba_gradient(size);
+        let config = SolverConfig {
+            pin_count: 48,
+            line_budget: 40,
+            ..Default::default()
+        };
+        let run = || {
+            let mut s = Solver::new(&rgba, size, config, mono_palette(), 42, None, 0.0).unwrap();
+            let mut pins = Vec::new();
+            while !s.is_done() {
+                let batch = s.step_many(40);
+                if batch.is_empty() {
+                    break;
+                }
+                pins.extend(batch);
+            }
+            pins
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a, b, "same seed should produce the same sequence");
+        assert_eq!(a.len(), config.line_budget as usize);
+    }
+
+    #[test]
+    fn color_deposit_pulls_canvas_toward_thread_and_updates_delta() {
+        // Start canvas at board; target is dark red; drop a red thread
+        // across a row. Canvas R stays close to board (already matches
+        // red-channel of board), canvas G and B drop toward 0 (thread
+        // color). Delta shrinks accordingly.
         let w = 8usize;
         let h = 8usize;
-        let mut canvas = vec![0.0f32; w * h * 3];
-        deposit_alpha(
+        let n = w * h;
+        let mut canvas = Vec::with_capacity(n * 3);
+        let mut delta = Vec::with_capacity(n * 3);
+        let mut target = Vec::with_capacity(n * 3);
+        for _ in 0..n {
+            canvas.push(BOARD_LINEAR[0]);
+            canvas.push(BOARD_LINEAR[1]);
+            canvas.push(BOARD_LINEAR[2]);
+            // Target is a deep red: high R, near-zero G/B.
+            target.push(BOARD_LINEAR[0]);
+            target.push(0.05);
+            target.push(0.05);
+            delta.push(0.0);
+            delta.push((BOARD_LINEAR[1] - 0.05).max(0.0));
+            delta.push((BOARD_LINEAR[2] - 0.05).max(0.0));
+        }
+        let red: LinearRgb = [srgb_to_linear(0.85), 0.0, 0.0];
+        deposit_color(
             &mut canvas,
+            &mut delta,
+            &target,
             w,
             h,
             Endpoints {
@@ -728,30 +782,38 @@ mod tests {
                 y1: 4.0,
             },
             0.5,
-            [1.0, 0.0, 0.0],
+            red,
         );
+        // Middle of the row: canvas[G,B] dropped, delta[G,B] shrunk.
         for x in 1..7 {
             let base = (4 * w + x) * 3;
             assert!(
-                canvas[base] > 0.3,
-                "R not lifted at x={x}: {}",
-                canvas[base]
+                canvas[base + 1] < BOARD_LINEAR[1] - 0.1,
+                "canvas G not darkened at x={x}: {}",
+                canvas[base + 1]
             );
-            assert!(canvas[base + 1].abs() < 1e-6, "G drifted at x={x}");
-            assert!(canvas[base + 2].abs() < 1e-6, "B drifted at x={x}");
+            assert!(
+                delta[base + 1] < (BOARD_LINEAR[1] - 0.05) - 0.05,
+                "delta G did not shrink at x={x}: {}",
+                delta[base + 1]
+            );
         }
     }
 
     #[test]
-    fn alpha_deposit_saturates_when_canvas_matches_thread() {
-        // Drawing a white thread onto a canvas already at white should
-        // leave the canvas unchanged — alpha compositing of like-on-like
-        // is a no-op regardless of opacity.
+    fn color_deposit_saturates_when_canvas_matches_thread() {
+        // Depositing a thread that equals the canvas should leave
+        // canvas unchanged; delta equally unchanged.
         let w = 8usize;
         let h = 8usize;
-        let mut canvas = vec![1.0f32; w * h * 3];
-        deposit_alpha(
+        let n = w * h;
+        let mut canvas = vec![0.0f32; n * 3];
+        let mut delta = vec![0.0f32; n * 3];
+        let target = vec![0.0f32; n * 3];
+        deposit_color(
             &mut canvas,
+            &mut delta,
+            &target,
             w,
             h,
             Endpoints {
@@ -761,21 +823,90 @@ mod tests {
                 y1: 4.0,
             },
             0.5,
-            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
         );
         for v in &canvas {
-            assert!((v - 1.0).abs() < 1e-5);
+            assert!(v.abs() < 1e-5);
         }
+        for v in &delta {
+            assert!(v.abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn color_solver_localizes_hue_matching_thread_to_matching_panel() {
+        // Two-panel pure-chromatic scene with a two-primary palette
+        // (red, blue — no black, no green). Joint-greedy scoring must
+        // pick red threads for chords whose midpoint lies on the red
+        // panel and blue for chords on the blue panel. This is the
+        // direct test that the 3-channel residual + basis-projection
+        // score discriminates hue; it can't pass with the older
+        // scalar-luminance-plus-post-hoc-classification path.
+        let size = 96usize;
+        let mut rgba = vec![0u8; size * size * 4];
+        for y in 0..size {
+            for x in 0..size {
+                let base = (y * size + x) * 4;
+                let (r, g, b) = if x < size / 2 {
+                    (220u8, 40u8, 40u8)
+                } else {
+                    (40u8, 40u8, 220u8)
+                };
+                rgba[base] = r;
+                rgba[base + 1] = g;
+                rgba[base + 2] = b;
+                rgba[base + 3] = 255;
+            }
+        }
+        let palette = Palette::from_srgb_bytes(&[0xc8, 0x20, 0x20, 0x20, 0x20, 0xc8]).unwrap();
+        let config = SolverConfig {
+            pin_count: 96,
+            line_budget: 300,
+            min_chord_skip: 6,
+            ..Default::default()
+        };
+        let mut s = Solver::new(&rgba, size, config, palette, 5, None, 0.0).unwrap();
+        let mut prev = 0u16;
+        let mut red_left = 0;
+        let mut red_right = 0;
+        let mut blue_left = 0;
+        let mut blue_right = 0;
+        while !s.is_done() {
+            let batch = s.step_many(50);
+            if batch.is_empty() {
+                break;
+            }
+            let colors = s.last_batch_colors();
+            for (pin, color) in batch.iter().zip(colors.iter()) {
+                let (x0, _) = s.pin_position(prev);
+                let (x1, _) = s.pin_position(*pin);
+                let mx = (x0 + x1) * 0.5;
+                let in_left = mx < size as f32 * 0.5;
+                match (color, in_left) {
+                    (0, true) => red_left += 1,
+                    (0, false) => red_right += 1,
+                    (1, true) => blue_left += 1,
+                    (1, false) => blue_right += 1,
+                    _ => {}
+                }
+                prev = *pin;
+            }
+        }
+        assert!(
+            red_left > red_right * 2,
+            "red thread should land on red panel: left={red_left} right={red_right}"
+        );
+        assert!(
+            blue_right > blue_left * 2,
+            "blue thread should land on blue panel: left={blue_left} right={blue_right}"
+        );
     }
 
     #[test]
     fn color_solver_picks_best_thread_per_step_and_interleaves() {
-        // Three panels × three primary threads. The interleaved solver
-        // picks whichever (pin, color) chord most reduces residual at
-        // each step. Sequences may interleave palette indices freely,
-        // but every color must end up represented (all three regions
-        // need their matching thread to reach the target) and the
-        // total emitted must equal the budget.
+        // Three panels × three primary threads. Joint-greedy should
+        // emit each of the three palette indices at least once and
+        // interleave (several color changes across the run).
         let size = 96usize;
         let mut rgba = vec![0u8; size * size * 4];
         for y in 0..size {
@@ -819,9 +950,6 @@ mod tests {
         for (i, &n) in counts.iter().enumerate() {
             assert!(n > 0, "color {i} was starved (0 lines)");
         }
-        // The sequence should include at least one color change; pure
-        // monotonic order would imply the old sequential budget is
-        // still in force.
         let mut changes = 0usize;
         for w in colors.windows(2) {
             if w[0] != w[1] {
@@ -832,35 +960,5 @@ mod tests {
             changes >= 2,
             "expected interleaved color picks, got {changes} changes"
         );
-    }
-
-    /// Golden test: mono output is deterministic for a fixed seed + image.
-    /// The expected sequence was re-captured for the alpha-composited
-    /// solver (the pre-alpha sequence in earlier PRs no longer applies).
-    #[test]
-    fn mono_golden_sequence_is_deterministic() {
-        let size = 64usize;
-        let rgba = rgba_gradient(size);
-        let config = SolverConfig {
-            pin_count: 48,
-            line_budget: 40,
-            ..Default::default()
-        };
-        let run = || {
-            let mut s = Solver::new(&rgba, size, config, mono_palette(), 42, None, 0.0).unwrap();
-            let mut pins = Vec::new();
-            while !s.is_done() {
-                let batch = s.step_many(40);
-                if batch.is_empty() {
-                    break;
-                }
-                pins.extend(batch);
-            }
-            pins
-        };
-        let a = run();
-        let b = run();
-        assert_eq!(a, b, "same seed should produce the same sequence");
-        assert_eq!(a.len(), config.line_budget as usize);
     }
 }
