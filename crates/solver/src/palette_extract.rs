@@ -34,16 +34,21 @@ const MAX_K: usize = 8;
 /// desaturated skin-tone sits at ~0.04–0.08 chroma; saturated
 /// primaries at ~0.12–0.30. Cream board + low-chroma thread looks
 /// indistinguishable from cream board alone at viewing distance,
-/// so we aggressively reject anything below saturated-primary
+/// so we aggressively reject anything below clearly-saturated
 /// territory and push centroids outward if the cluster is warm but
-/// unsaturated.
-const MUDDY_CHROMA_THRESHOLD: f32 = 0.10;
+/// unsaturated. Raised from 0.10 after user reports of muddy
+/// palette picks on skin-tone / landscape content — the boost
+/// factor below was letting ~0.06 raw centroids whitewash through.
+const MUDDY_CHROMA_THRESHOLD: f32 = 0.14;
 
 /// When a raw k-means centroid is below `MUDDY_CHROMA_THRESHOLD`,
 /// we try to "saturate" it by multiplying its (a, b) components by
 /// this factor and keeping the original L. If the boosted result
-/// still falls below threshold, the centroid is dropped.
-const CHROMA_BOOST_FACTOR: f32 = 1.8;
+/// still falls below threshold, the centroid is dropped. Tightened
+/// from 1.8 to 1.3: an aggressive boost on a genuinely muddy cluster
+/// ships a still-muddy thread that happens to clear the cutoff. At
+/// 1.3 the boost only rescues clusters already close to saturated.
+const CHROMA_BOOST_FACTOR: f32 = 1.3;
 
 /// Minimum OKLab distance between two chromatic centroids for them
 /// to be considered distinct. Below this, a candidate is rejected
@@ -776,6 +781,14 @@ fn primary_fallback_palette(
             break;
         }
         let c = CANONICAL_PRIMARIES[idx];
+        // Skip canonical primaries that don't clear the muddiness
+        // gate. Olive, brick, and salmon sit below the raised
+        // threshold and muddy the palette when the fallback fires
+        // on earth-toned content.
+        let lab = linear_to_oklab(srgb_bytes_to_linear(c));
+        if oklab_chroma(lab) < MUDDY_CHROMA_THRESHOLD {
+            continue;
+        }
         if already_picked
             .iter()
             .chain(out.iter())
