@@ -286,16 +286,22 @@ function drawCell(
     // Break rows mark a thread cut — the builder finishes the
     // previous run, ties off, and restarts at the nail number
     // shown. The step still counts so the booklet's numbering
-    // stays a 1:1 map with `sequence`.
-    page.drawText("cut · restart at", {
-      x: x + 60,
+    // stays a 1:1 map with `sequence`. Nail is placed right after
+    // the label's actual width (plus a small gap) — the previous
+    // hard-coded x was narrower than the label itself in Courier 9
+    // and the two texts ran into each other.
+    const label = "cut · restart at ";
+    const labelX = x + 60;
+    const labelWidth = font.widthOfTextAtSize(label, 9);
+    page.drawText(label, {
+      x: labelX,
       y: y + 3,
       size: 9,
       font,
       color: muted,
     });
     page.drawText(String(nail).padStart(3, "0"), {
-      x: x + 132,
+      x: labelX + labelWidth,
       y: y + 3,
       size: 11,
       font: bold,
