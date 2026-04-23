@@ -5,7 +5,10 @@ pub mod preprocess;
 pub mod solver;
 
 use preprocess::Params;
-use solver::{palette::Palette, weight::FaceBox, Solver as GreedySolver, SolverConfig};
+use solver::{
+    palette::Palette, weight::FaceBox, Solver as GreedySolver, SolverConfig,
+    MAX_PALETTE_FOR_BUDGETS,
+};
 
 /// Wasm-exposed palette extractor. Returns `k * 3` sRGB bytes, slot 0
 /// first. When `face_w` and `face_h` are both positive, the face box
@@ -125,6 +128,11 @@ pub struct SolverParams {
     pub ban_window: u32,
     pub temperature_start: f32,
     pub temperature_end: f32,
+    /// Color-run batching penalty: score multiplier applied to
+    /// candidate `(pin, color)` pairs whose color differs from the
+    /// current spool. `0.0` is fully interleaved (legacy), `0.15` is
+    /// the Vrellis-style default. Mono ignores this.
+    pub switch_cost_factor: f32,
     /// Face region in image coordinates. Zero width/height disables face bias.
     pub face_x: f32,
     pub face_y: f32,
@@ -146,6 +154,7 @@ impl SolverParams {
             ban_window: d.ban_window as u32,
             temperature_start: d.temperature_start,
             temperature_end: d.temperature_end,
+            switch_cost_factor: d.switch_cost_factor,
             face_x: 0.0,
             face_y: 0.0,
             face_w: 0.0,
@@ -171,6 +180,8 @@ impl From<SolverParams> for SolverConfig {
             ban_window: p.ban_window.min(u16::MAX as u32) as u16,
             temperature_start: p.temperature_start,
             temperature_end: p.temperature_end,
+            switch_cost_factor: p.switch_cost_factor,
+            color_budgets: [0; MAX_PALETTE_FOR_BUDGETS],
         }
     }
 }
@@ -217,6 +228,15 @@ impl Solver {
         )
         .map_err(JsValue::from_str)?;
         Ok(Solver { inner, size })
+    }
+
+    /// Set per-color line caps, indexed by palette slot. `0` means
+    /// uncapped for that color. Ignored entries past the palette
+    /// length. Call after construction and before `stepMany` to
+    /// keep black from monopolizing dark portraits.
+    #[wasm_bindgen(js_name = setColorBudgets)]
+    pub fn set_color_budgets(&mut self, budgets: &[u32]) {
+        self.inner.set_color_budgets(budgets);
     }
 
     /// Advance up to `max` lines. Returns the pin indices reached, in order.

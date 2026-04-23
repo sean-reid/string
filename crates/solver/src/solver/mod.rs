@@ -80,6 +80,10 @@ const BOARD_LINEAR: LinearRgb = [
 /// and palette eligibility filters.
 const BOARD_LUMINANCE: f32 = 0.2126 * 0.904_587_8 + 0.7152 * 0.862_741_3 + 0.0722 * 0.784_452_6;
 
+/// Maximum palette size supported by the solver's per-color budget
+/// scheduler. The UI caps user-facing palettes at 6; 8 gives headroom.
+pub const MAX_PALETTE_FOR_BUDGETS: usize = 8;
+
 #[derive(Clone, Copy, Debug)]
 pub struct SolverConfig {
     pub pin_count: u16,
@@ -89,6 +93,21 @@ pub struct SolverConfig {
     pub ban_window: u16,
     pub temperature_start: f32,
     pub temperature_end: f32,
+    /// Multiplicative score penalty applied to candidate `(pin, color)`
+    /// pairs whose color differs from the currently-wound spool.
+    /// `0.0` is fully interleaved (legacy), `0.15` produces the
+    /// characteristic 20–80-chord Vrellis-style runs, `≥0.3`
+    /// approaches rigidly sequential per-color builds. Mono ignores
+    /// this.
+    pub switch_cost_factor: f32,
+    /// Per-color line caps, indexed by palette slot. `0` means
+    /// uncapped for that color. The scorer applies a soft
+    /// diminishing-returns multiplier as a color approaches its cap
+    /// and hard-excludes colors that have reached it, preventing
+    /// black from monopolizing dark portraits. Entries past the
+    /// palette length are ignored; a config with all zeros reverts
+    /// to the legacy unrestricted behavior.
+    pub color_budgets: [u32; MAX_PALETTE_FOR_BUDGETS],
 }
 
 impl Default for SolverConfig {
@@ -101,9 +120,16 @@ impl Default for SolverConfig {
             ban_window: 20,
             temperature_start: 0.008,
             temperature_end: 0.0008,
+            switch_cost_factor: 0.15,
+            color_budgets: [0; MAX_PALETTE_FOR_BUDGETS],
         }
     }
 }
+
+/// Fraction of a color's budget below which the soft
+/// diminishing-returns ramp kicks in. Above this, no penalty; at the
+/// cap, the multiplier is zero.
+const BUDGET_SOFT_HEADROOM: f32 = 0.2;
 
 /// Mode-specific solver state. Mono keeps its legacy scalar
 /// luminance residual; Color uses a 3-channel linear-RGB target +
@@ -148,6 +174,14 @@ pub struct Solver {
     /// Palette index chosen for each pin emitted in the most recent
     /// `step_many`. All-zero in mono.
     last_batch_colors: Vec<u8>,
+    /// Running line count per palette index. Used to enforce
+    /// `color_budgets` and report spool usage. Length = palette size.
+    color_usage: Vec<u32>,
+    /// Palette index of the most recently deposited chord, or `None`
+    /// before the first color deposit. Drives the switch-cost penalty
+    /// so chords that extend the current spool score higher than
+    /// chords that require a spool switch.
+    current_color: Option<u8>,
     rng: ChaCha8Rng,
     current: u16,
     ban_queue: VecDeque<u16>,
@@ -237,6 +271,8 @@ impl Solver {
             }
         };
 
+        let palette_len = palette.len();
+
         Ok(Self {
             width: size,
             height: size,
@@ -248,6 +284,8 @@ impl Solver {
             palette,
             mode,
             last_batch_colors: Vec::new(),
+            color_usage: vec![0; palette_len],
+            current_color: None,
             rng: ChaCha8Rng::seed_from_u64(seed),
             current: 0,
             ban_queue: VecDeque::with_capacity(config.ban_window as usize),
@@ -257,6 +295,17 @@ impl Solver {
 
     pub fn palette_size(&self) -> u8 {
         self.palette.len() as u8
+    }
+
+    /// Overwrite per-color line caps after construction. Truncates
+    /// to the capacity of the fixed-size budget array. `0` entries
+    /// mean uncapped.
+    pub fn set_color_budgets(&mut self, budgets: &[u32]) {
+        let mut caps = [0u32; MAX_PALETTE_FOR_BUDGETS];
+        for (slot, &cap) in caps.iter_mut().zip(budgets.iter()) {
+            *slot = cap;
+        }
+        self.config.color_budgets = caps;
     }
 
     pub fn mode(&self) -> Mode {
@@ -337,13 +386,52 @@ impl Solver {
         out
     }
 
+    /// Soft budget multiplier for color `k`: `1.0` until a color has
+    /// consumed `(1 - BUDGET_SOFT_HEADROOM)` of its cap, then ramps
+    /// linearly down to zero at the cap. `0` cap entries mean
+    /// uncapped (always return `1.0`). Colors at or past their cap
+    /// return `0.0` so the scorer can cheaply hard-exclude them.
+    fn budget_multiplier(&self, color_index: usize) -> f32 {
+        let cap = self
+            .config
+            .color_budgets
+            .get(color_index)
+            .copied()
+            .unwrap_or(0);
+        if cap == 0 {
+            return 1.0;
+        }
+        let used = self.color_usage.get(color_index).copied().unwrap_or(0);
+        if used >= cap {
+            return 0.0;
+        }
+        let soft_start = (cap as f32) * (1.0 - BUDGET_SOFT_HEADROOM);
+        if (used as f32) <= soft_start {
+            return 1.0;
+        }
+        let remaining = (cap - used) as f32;
+        let headroom = (cap as f32) * BUDGET_SOFT_HEADROOM;
+        (remaining / headroom).clamp(0.0, 1.0)
+    }
+
     /// Color chord candidates, scored jointly over `(pin, color)`.
     /// For each candidate pin we walk the chord once to accumulate
     /// `acc = avg_{W,c}(delta)` (saliency-and-coverage-weighted mean
-    /// delta vector). Then for each palette color k the score is
+    /// delta vector). Then for each palette color k the raw score is
     /// `acc · thread_basis[k]` — projection of remaining demand onto
-    /// that thread's darkening direction. Chord rasterization is
-    /// amortized over all K colors.
+    /// that thread's darkening direction — and two multiplicative
+    /// adjustments are applied:
+    ///
+    /// - **Switch-cost penalty**: colors different from the currently
+    ///   wound spool are scaled by `(1 - switch_cost_factor)`, which
+    ///   biases the solver toward contiguous runs a physical builder
+    ///   can wind without cutting.
+    /// - **Budget multiplier**: colors past their soft-headroom
+    ///   threshold are scaled down toward zero at the hard cap, so
+    ///   the per-color budget from Stage B is respected without the
+    ///   scorer needing to know about caps at deposit time.
+    ///
+    /// Chord rasterization is amortized over all K colors.
     fn score_candidates_color(&self) -> Vec<(u16, u8, f32)> {
         let SolverState::Color {
             delta,
@@ -355,6 +443,12 @@ impl Solver {
         };
         let n = self.config.pin_count;
         let (cx, cy) = self.pin_position(self.current);
+
+        let budget_mults: Vec<f32> = (0..thread_basis.len())
+            .map(|k| self.budget_multiplier(k))
+            .collect();
+        let switch_keep = (1.0 - self.config.switch_cost_factor.clamp(0.0, 1.0)).max(0.0);
+
         let mut out = Vec::with_capacity((n as usize) * thread_basis.len());
         for i in 0..n {
             if i == self.current
@@ -382,7 +476,20 @@ impl Solver {
             acc[1] *= inv;
             acc[2] *= inv;
             for (k, b) in thread_basis.iter().enumerate() {
-                let s = acc[0] * b[0] + acc[1] * b[1] + acc[2] * b[2];
+                let budget = budget_mults[k];
+                if budget <= 0.0 {
+                    continue;
+                }
+                let raw = acc[0] * b[0] + acc[1] * b[1] + acc[2] * b[2];
+                if raw <= 0.0 {
+                    continue;
+                }
+                let is_switch = match self.current_color {
+                    Some(c) => c as usize != k,
+                    None => false,
+                };
+                let switch_mult = if is_switch { switch_keep } else { 1.0 };
+                let s = raw * budget * switch_mult;
                 out.push((i, k as u8, s));
             }
         }
@@ -533,6 +640,10 @@ impl Solver {
                         self.config.opacity,
                         thread,
                     );
+                    if let Some(slot) = self.color_usage.get_mut(color_index as usize) {
+                        *slot += 1;
+                    }
+                    self.current_color = Some(color_index);
                 }
             }
             if self.ban_queue.len() >= self.config.ban_window as usize {
@@ -959,6 +1070,114 @@ mod tests {
         assert!(
             changes >= 2,
             "expected interleaved color picks, got {changes} changes"
+        );
+    }
+
+    fn three_panel_rgba(size: usize) -> Vec<u8> {
+        let mut rgba = vec![0u8; size * size * 4];
+        for y in 0..size {
+            for x in 0..size {
+                let base = (y * size + x) * 4;
+                let (r, g, b) = if x < size / 3 {
+                    (220u8, 20u8, 20u8)
+                } else if x < 2 * size / 3 {
+                    (20u8, 200u8, 20u8)
+                } else {
+                    (20u8, 20u8, 220u8)
+                };
+                rgba[base] = r;
+                rgba[base + 1] = g;
+                rgba[base + 2] = b;
+                rgba[base + 3] = 255;
+            }
+        }
+        rgba
+    }
+
+    fn count_color_switches(colors: &[u8]) -> usize {
+        colors.windows(2).filter(|w| w[0] != w[1]).count()
+    }
+
+    #[test]
+    fn switch_cost_reduces_spool_changes() {
+        // Same target + palette + seed, but switch_cost_factor=0 vs
+        // switch_cost_factor=0.3. The penalized run should produce
+        // noticeably fewer color switches (longer contiguous runs).
+        let size = 96usize;
+        let rgba = three_panel_rgba(size);
+        let palette = Palette::from_srgb_bytes(&[255, 0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
+        let drive = |factor: f32| -> Vec<u8> {
+            let config = SolverConfig {
+                pin_count: 96,
+                line_budget: 300,
+                min_chord_skip: 6,
+                switch_cost_factor: factor,
+                ..Default::default()
+            };
+            let mut s =
+                Solver::new(&rgba, size, config, palette.clone(), 21, None, 0.0).unwrap();
+            let mut colors = Vec::new();
+            while !s.is_done() {
+                let batch = s.step_many(50);
+                if batch.is_empty() {
+                    break;
+                }
+                colors.extend(s.last_batch_colors());
+            }
+            colors
+        };
+        let loose = drive(0.0);
+        let tight = drive(0.3);
+        let switches_loose = count_color_switches(&loose);
+        let switches_tight = count_color_switches(&tight);
+        assert!(
+            switches_tight < switches_loose,
+            "switch_cost=0.3 did not reduce switches: loose={switches_loose} tight={switches_tight}"
+        );
+    }
+
+    #[test]
+    fn color_budget_caps_per_color_line_count() {
+        // Apply a cap of 40 chords to color 0 (red) on a three-panel
+        // image. The cap must be respected, and the remaining budget
+        // should flow to the other colors.
+        let size = 96usize;
+        let rgba = three_panel_rgba(size);
+        let palette = Palette::from_srgb_bytes(&[255, 0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
+        let mut budgets = [0u32; MAX_PALETTE_FOR_BUDGETS];
+        budgets[0] = 40;
+        let config = SolverConfig {
+            pin_count: 96,
+            line_budget: 300,
+            min_chord_skip: 6,
+            color_budgets: budgets,
+            ..Default::default()
+        };
+        let mut s = Solver::new(&rgba, size, config, palette, 9, None, 0.0).unwrap();
+        let mut counts = [0u32; 3];
+        while !s.is_done() {
+            let batch = s.step_many(50);
+            if batch.is_empty() {
+                break;
+            }
+            for &c in s.last_batch_colors().iter() {
+                counts[c as usize] += 1;
+            }
+        }
+        assert!(
+            counts[0] <= 40,
+            "red should respect its 40-line cap, got {}",
+            counts[0]
+        );
+        assert!(
+            counts[0] > 0,
+            "red should not be starved before reaching its cap"
+        );
+        assert!(
+            counts[1] + counts[2] >= 250,
+            "remaining budget should flow to uncapped colors: green={}, blue={}",
+            counts[1],
+            counts[2]
         );
     }
 }
