@@ -239,13 +239,58 @@ export function ColorPickerPopover({
   };
 
   /**
-   * Touch-events-only drag path. iOS Safari's Pointer Events
-   * implementation for touch is unreliable: pointermove can arrive
-   * with stale clientX or get skipped, which drove the marker to
-   * the extremes during drag. TouchEvent.changedTouches[0].clientX
-   * doesn't have that bug — it's the canonical source of truth for
-   * touch coordinates on iOS and Android. We identify the drag by
-   * `touch.identifier` so a second finger can't hijack it.
+   * Lock body scroll for the lifetime of a drag and batch apply
+   * calls to animation frames. iOS Safari can schedule touchmove
+   * events at higher-than-frame rates and can rubber-band scroll
+   * even with touch-action: none on the dragged element — scroll
+   * lock + one apply per rAF eliminates both sources of jitter.
+   */
+  const createRafApply = (
+    rect: DOMRect,
+    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
+  ) => {
+    let rafId: number | null = null;
+    let pending: { x: number; y: number } | null = null;
+    const run = () => {
+      rafId = null;
+      if (!pending) return;
+      apply(pending.x, pending.y, rect);
+      pending = null;
+    };
+    return {
+      schedule(x: number, y: number) {
+        pending = { x, y };
+        if (rafId === null) rafId = requestAnimationFrame(run);
+      },
+      flush() {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        if (pending) {
+          apply(pending.x, pending.y, rect);
+          pending = null;
+        }
+      },
+    };
+  };
+
+  const lockBodyScroll = () => {
+    const body = document.body;
+    const prev = body.style.overflow;
+    body.style.overflow = "hidden";
+    return () => {
+      body.style.overflow = prev;
+    };
+  };
+
+  /**
+   * Touch-events-only drag path. iOS Safari's Pointer Events for
+   * touch are unreliable — clientX snaps to 0 or arrives stale,
+   * driving the marker to an edge. TouchEvent.changedTouches[0]
+   * is the canonical source of truth on iOS. The drag is pinned
+   * to a single `touch.identifier` so a second finger can't hijack
+   * it.
    */
   const startTouchDrag = (
     rect: DOMRect,
@@ -255,6 +300,8 @@ export function ColorPickerPopover({
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     onEnd: () => void,
   ) => {
+    const unlock = lockBodyScroll();
+    const scheduler = createRafApply(rect, apply);
     apply(initialX, initialY, rect);
     const findTouch = (ev: TouchEvent) => {
       for (let i = 0; i < ev.changedTouches.length; i += 1) {
@@ -267,12 +314,14 @@ export function ColorPickerPopover({
       const t = findTouch(ev);
       if (!t) return;
       ev.preventDefault();
-      apply(t.clientX, t.clientY, rect);
+      scheduler.schedule(t.clientX, t.clientY);
     };
     const cleanup = () => {
+      scheduler.flush();
       window.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onEndEvt);
       window.removeEventListener("touchcancel", onEndEvt);
+      unlock();
       onEnd();
     };
     const onEndEvt = (ev: TouchEvent) => {
@@ -294,10 +343,12 @@ export function ColorPickerPopover({
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     onEnd: () => void,
   ) => {
+    const scheduler = createRafApply(rect, apply);
     const onMove = (ev: MouseEvent) => {
-      apply(ev.clientX, ev.clientY, rect);
+      scheduler.schedule(ev.clientX, ev.clientY);
     };
     const cleanup = () => {
+      scheduler.flush();
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onEndEvt);
       onEnd();
