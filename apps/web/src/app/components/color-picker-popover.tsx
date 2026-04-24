@@ -119,6 +119,14 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const svRef = useRef<HTMLDivElement | null>(null);
   const hueRef = useRef<HTMLDivElement | null>(null);
+  // Drag state kept as refs so we can avoid re-renders per pointer
+  // frame and avoid relying on `e.buttons`, which is reported as 0
+  // on Android Chrome's touch pointermove events. `rect` is captured
+  // at pointerdown so later moves use a stable rect even if the
+  // popover repositions, and `pointerId` lets us ignore secondary
+  // touches that might bubble in from multi-touch.
+  const svDragRef = useRef<{ pointerId: number; rect: DOMRect } | null>(null);
+  const hueDragRef = useRef<{ pointerId: number; rect: DOMRect } | null>(null);
   // Local state is authoritative while the popover is open. Syncing
   // back from `value` on every prop change creates a feedback loop:
   // our own onChange writes to the parent store, the store hands a
@@ -165,8 +173,16 @@ export function ColorPickerPopover({
       const anchorRect = anchor.getBoundingClientRect();
       const popoverWidth = popoverRef.current?.offsetWidth ?? 256;
       const margin = 12;
-      const viewportWidth =
-        document.documentElement.clientWidth || window.innerWidth;
+      // Take the tightest available measurement of the visible
+      // viewport. Mobile Chrome/Safari can return different values
+      // across these depending on URL-bar state, device-scale, and
+      // horizontal overflow elsewhere on the page — using the
+      // smallest keeps the popover inside whatever the user can see.
+      const viewportWidth = Math.min(
+        window.innerWidth || Number.MAX_SAFE_INTEGER,
+        document.documentElement.clientWidth || Number.MAX_SAFE_INTEGER,
+        window.visualViewport?.width ?? Number.MAX_SAFE_INTEGER,
+      );
       const minLeft = margin;
       const maxLeft = viewportWidth - popoverWidth - margin;
       let left = anchorRect.left;
@@ -177,10 +193,8 @@ export function ColorPickerPopover({
     };
     measure();
     window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
     return () => {
       window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
     };
   }, [anchor]);
 
@@ -200,10 +214,7 @@ export function ColorPickerPopover({
     onChange(hex);
   };
 
-  const svFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
-    const el = svRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
+  const svFromPointer = (e: React.PointerEvent<HTMLDivElement>, rect: DOMRect) => {
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
     const s = Math.min(1, Math.max(0, x));
@@ -211,10 +222,7 @@ export function ColorPickerPopover({
     commitHsv({ s, v });
   };
 
-  const hueFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
-    const el = hueRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
+  const hueFromPointer = (e: React.PointerEvent<HTMLDivElement>, rect: DOMRect) => {
     const x = (e.clientX - rect.left) / rect.width;
     const h = Math.min(360, Math.max(0, x * 360));
     commitHsv({ h });
@@ -271,11 +279,26 @@ export function ColorPickerPopover({
             "linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)), linear-gradient(to right, rgba(255,255,255,1), rgba(255,255,255,0))",
         }}
         onPointerDown={(e) => {
-          e.currentTarget.setPointerCapture(e.pointerId);
-          svFromPointer(e);
+          const el = e.currentTarget;
+          el.setPointerCapture(e.pointerId);
+          const rect = el.getBoundingClientRect();
+          svDragRef.current = { pointerId: e.pointerId, rect };
+          svFromPointer(e, rect);
         }}
         onPointerMove={(e) => {
-          if ((e.buttons & 1) === 1) svFromPointer(e);
+          const drag = svDragRef.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          svFromPointer(e, drag.rect);
+        }}
+        onPointerUp={(e) => {
+          if (svDragRef.current?.pointerId === e.pointerId) {
+            svDragRef.current = null;
+          }
+        }}
+        onPointerCancel={(e) => {
+          if (svDragRef.current?.pointerId === e.pointerId) {
+            svDragRef.current = null;
+          }
         }}
       >
         <span
@@ -302,11 +325,26 @@ export function ColorPickerPopover({
             "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",
         }}
         onPointerDown={(e) => {
-          e.currentTarget.setPointerCapture(e.pointerId);
-          hueFromPointer(e);
+          const el = e.currentTarget;
+          el.setPointerCapture(e.pointerId);
+          const rect = el.getBoundingClientRect();
+          hueDragRef.current = { pointerId: e.pointerId, rect };
+          hueFromPointer(e, rect);
         }}
         onPointerMove={(e) => {
-          if ((e.buttons & 1) === 1) hueFromPointer(e);
+          const drag = hueDragRef.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          hueFromPointer(e, drag.rect);
+        }}
+        onPointerUp={(e) => {
+          if (hueDragRef.current?.pointerId === e.pointerId) {
+            hueDragRef.current = null;
+          }
+        }}
+        onPointerCancel={(e) => {
+          if (hueDragRef.current?.pointerId === e.pointerId) {
+            hueDragRef.current = null;
+          }
         }}
       >
         <span
