@@ -234,10 +234,18 @@ export function ColorPickerPopover({
       );
       const minLeft = margin;
       const maxLeft = viewportWidth - popoverWidth - margin;
-      let left = anchorRect.left;
-      if (left > maxLeft) left = maxLeft;
-      if (left < minLeft) left = minLeft;
-      const top = anchorRect.bottom + 6;
+      let leftViewport = anchorRect.left;
+      if (leftViewport > maxLeft) leftViewport = maxLeft;
+      if (leftViewport < minLeft) leftViewport = minLeft;
+      const topViewport = anchorRect.bottom + 6;
+      // We position with `absolute` (not fixed) on iOS 26 — fixed
+      // elements there jitter during touch gestures (WebKit bug
+      // 297779: visualViewport.offsetTop becomes incorrectly set to
+      // 24px during address-bar collapse, and fixed children shift).
+      // Body scroll is locked while the popover is open so absolute
+      // coords stay aligned with the viewport.
+      const top = topViewport + window.scrollY;
+      const left = leftViewport + window.scrollX;
       setPlacement({ top, left });
     };
     measure();
@@ -361,7 +369,7 @@ export function ColorPickerPopover({
       ref={popoverRef}
       role="dialog"
       aria-label="Edit swatch color"
-      className="fixed z-50 flex w-64 flex-col gap-3 rounded-md border border-line bg-paper p-3 shadow-lg"
+      className="absolute z-50 flex w-64 flex-col gap-3 rounded-md border border-line bg-paper p-3 shadow-lg"
       style={{
         top: placement?.top ?? 0,
         left: placement?.left ?? 0,
