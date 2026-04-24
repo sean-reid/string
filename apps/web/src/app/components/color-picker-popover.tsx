@@ -62,20 +62,31 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState(value);
   const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
-  // The picker emits a hex on every pointermove. Bubbling each one to
-  // the parent (which writes to the global store and re-renders this
-  // popover) drowns iOS Safari's render budget and the picker's own
-  // marker can't keep up with the finger. Throttle the upstream
-  // commit to once per animation frame; local draft + the picker's
-  // own internal state still update at the full event rate so the
-  // marker tracks smoothly.
+  // The picker emits a hex on every pointermove. Each one used to flow
+  // to the global store, re-rendering ParameterRail + lines-canvas (which
+  // forces a layout flush via parent.clientWidth) on every frame. On iOS
+  // Safari that contention starves the picker's marker of paint budget —
+  // hsva tracks the finger correctly (color was accurate) but the marker
+  // DOM element jitters. Defer the upstream commit to drag-end: local
+  // draft updates at the event rate (live preview swatch + hex input
+  // inside the popover stay in sync), but the parent and the rest of
+  // the app see exactly one update per drag.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const pendingHexRef = useRef<string | null>(null);
-  const rafIdRef = useRef<number | null>(null);
+  const dragEndAttachedRef = useRef(false);
+
+  const flushPending = () => {
+    const hex = pendingHexRef.current;
+    pendingHexRef.current = null;
+    if (hex) onChangeRef.current(hex);
+  };
+
+  // Detach + flush on unmount so a closing popover always commits its
+  // last drag value.
   useEffect(
     () => () => {
-      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+      flushPending();
     },
     [],
   );
@@ -132,10 +143,6 @@ export function ColorPickerPopover({
     const normalized = clampHex(next);
     if (!normalized) return;
     setDraft(normalized);
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
     pendingHexRef.current = null;
     onChangeRef.current(normalized);
   };
@@ -145,14 +152,25 @@ export function ColorPickerPopover({
     if (!normalized) return;
     setDraft(normalized);
     pendingHexRef.current = normalized;
-    if (rafIdRef.current === null) {
-      rafIdRef.current = requestAnimationFrame(() => {
-        rafIdRef.current = null;
-        const hex = pendingHexRef.current;
-        pendingHexRef.current = null;
-        if (hex) onChangeRef.current(hex);
-      });
-    }
+    if (dragEndAttachedRef.current) return;
+    dragEndAttachedRef.current = true;
+    const onEnd = () => {
+      dragEndAttachedRef.current = false;
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("mouseup", onEnd);
+      flushPending();
+    };
+    // Listen on every release path the picker might take. react-colorful
+    // attaches the same listeners internally; ours fire after theirs so
+    // the final hex they emit is in pendingHexRef when we flush.
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    window.addEventListener("touchend", onEnd);
+    window.addEventListener("touchcancel", onEnd);
+    window.addEventListener("mouseup", onEnd);
   };
 
   const current = clampHex(draft) || value;
