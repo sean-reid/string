@@ -238,6 +238,66 @@ export function ColorPickerPopover({
     commitHsv({ h });
   };
 
+  /**
+   * Bind parallel pointer + touch listeners on window for the
+   * lifetime of a drag. iOS Safari delivers pointermove events
+   * unreliably for touch — positions can arrive stale or with
+   * clientX snapped to 0, which manifested as the marker jumping
+   * to an edge. Touch events don't have that problem on iOS, so we
+   * listen to both and let whichever fires first "claim" the drag,
+   * then ignore the other source to avoid double-applies on
+   * browsers that dispatch both.
+   */
+  const startDrag = (
+    rect: DOMRect,
+    initialX: number,
+    initialY: number,
+    pointerId: number,
+    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
+    onEnd: () => void,
+  ) => {
+    apply(initialX, initialY, rect);
+    let source: "pointer" | "touch" | null = null;
+    const cleanup = () => {
+      window.removeEventListener("pointermove", pointerMove);
+      window.removeEventListener("pointerup", pointerUp);
+      window.removeEventListener("pointercancel", pointerUp);
+      window.removeEventListener("touchmove", touchMove);
+      window.removeEventListener("touchend", touchEnd);
+      window.removeEventListener("touchcancel", touchEnd);
+      onEnd();
+    };
+    const pointerMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      if (source === "touch") return;
+      source = "pointer";
+      ev.preventDefault();
+      apply(ev.clientX, ev.clientY, rect);
+    };
+    const pointerUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      if (source === "touch") return;
+      cleanup();
+    };
+    const touchMove = (ev: TouchEvent) => {
+      const touch = ev.changedTouches[0] ?? ev.touches[0];
+      if (!touch) return;
+      source = "touch";
+      ev.preventDefault();
+      apply(touch.clientX, touch.clientY, rect);
+    };
+    const touchEnd = () => {
+      if (source !== "touch") return;
+      cleanup();
+    };
+    window.addEventListener("pointermove", pointerMove, { passive: false });
+    window.addEventListener("pointerup", pointerUp);
+    window.addEventListener("pointercancel", pointerUp);
+    window.addEventListener("touchmove", touchMove, { passive: false });
+    window.addEventListener("touchend", touchEnd);
+    window.addEventListener("touchcancel", touchEnd);
+  };
+
   const pureHue = `hsl(${Math.round(hsv.h)}, 100%, 50%)`;
   const current = clampHex(draft) || value;
 
@@ -294,22 +354,9 @@ export function ColorPickerPopover({
           const rect = el.getBoundingClientRect();
           const pointerId = e.pointerId;
           svDragRef.current = { pointerId, rect };
-          applySv(e.clientX, e.clientY, rect);
-          const onMove = (ev: PointerEvent) => {
-            if (ev.pointerId !== pointerId) return;
-            ev.preventDefault();
-            applySv(ev.clientX, ev.clientY, rect);
-          };
-          const onEnd = (ev: PointerEvent) => {
-            if (ev.pointerId !== pointerId) return;
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onEnd);
-            window.removeEventListener("pointercancel", onEnd);
+          startDrag(rect, e.clientX, e.clientY, pointerId, applySv, () => {
             svDragRef.current = null;
-          };
-          window.addEventListener("pointermove", onMove, { passive: false });
-          window.addEventListener("pointerup", onEnd);
-          window.addEventListener("pointercancel", onEnd);
+          });
         }}
       >
         <span
@@ -341,22 +388,16 @@ export function ColorPickerPopover({
           const rect = el.getBoundingClientRect();
           const pointerId = e.pointerId;
           hueDragRef.current = { pointerId, rect };
-          applyHue(e.clientX, rect);
-          const onMove = (ev: PointerEvent) => {
-            if (ev.pointerId !== pointerId) return;
-            ev.preventDefault();
-            applyHue(ev.clientX, rect);
-          };
-          const onEnd = (ev: PointerEvent) => {
-            if (ev.pointerId !== pointerId) return;
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onEnd);
-            window.removeEventListener("pointercancel", onEnd);
-            hueDragRef.current = null;
-          };
-          window.addEventListener("pointermove", onMove, { passive: false });
-          window.addEventListener("pointerup", onEnd);
-          window.addEventListener("pointercancel", onEnd);
+          startDrag(
+            rect,
+            e.clientX,
+            e.clientY,
+            pointerId,
+            (x, _y, r) => applyHue(x, r),
+            () => {
+              hueDragRef.current = null;
+            },
+          );
         }}
       >
         <span
