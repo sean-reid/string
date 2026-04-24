@@ -119,12 +119,13 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const svRef = useRef<HTMLDivElement | null>(null);
   const hueRef = useRef<HTMLDivElement | null>(null);
-  // Drag state kept as refs so we can avoid re-renders per pointer
-  // frame and avoid relying on `e.buttons`, which is reported as 0
-  // on Android Chrome's touch pointermove events. `rect` is captured
-  // at pointerdown so later moves use a stable rect even if the
-  // popover repositions, and `pointerId` lets us ignore secondary
-  // touches that might bubble in from multi-touch.
+  // Drag uses native window listeners instead of React's synthetic
+  // onPointerMove. React's pointermove flows through the root's event
+  // delegation and on Android Chrome some events arrive with stale
+  // clientX or skipped moves, which produced the "marker jumps to an
+  // edge" jitter. Native window listeners bound at pointerdown fire
+  // in real event order with the raw event object; we clean them up
+  // on pointerup / cancel.
   const svDragRef = useRef<{ pointerId: number; rect: DOMRect } | null>(null);
   const hueDragRef = useRef<{ pointerId: number; rect: DOMRect } | null>(null);
   // Local state is authoritative while the popover is open. Syncing
@@ -198,6 +199,15 @@ export function ColorPickerPopover({
     };
   }, [anchor]);
 
+  // Fresh refs to avoid stale-closure bugs in window listeners: the
+  // listeners capture these once on pointerdown, but we want them to
+  // always see the latest hsv and onChange without re-binding per
+  // render.
+  const hsvRef = useRef(hsv);
+  const onChangeRef = useRef(onChange);
+  hsvRef.current = hsv;
+  onChangeRef.current = onChange;
+
   const commitHex = (next: string) => {
     const normalized = clampHex(next);
     if (!normalized) return;
@@ -207,23 +217,23 @@ export function ColorPickerPopover({
   };
 
   const commitHsv = (patch: Partial<Hsv>) => {
-    const merged = { ...hsv, ...patch };
+    const merged = { ...hsvRef.current, ...patch };
     const hex = hsvToHex(merged);
     setHsv(merged);
     setDraft(hex);
-    onChange(hex);
+    onChangeRef.current(hex);
   };
 
-  const svFromPointer = (e: React.PointerEvent<HTMLDivElement>, rect: DOMRect) => {
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+  const applySv = (clientX: number, clientY: number, rect: DOMRect) => {
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
     const s = Math.min(1, Math.max(0, x));
     const v = Math.min(1, Math.max(0, 1 - y));
     commitHsv({ s, v });
   };
 
-  const hueFromPointer = (e: React.PointerEvent<HTMLDivElement>, rect: DOMRect) => {
-    const x = (e.clientX - rect.left) / rect.width;
+  const applyHue = (clientX: number, rect: DOMRect) => {
+    const x = (clientX - rect.left) / rect.width;
     const h = Math.min(360, Math.max(0, x * 360));
     commitHsv({ h });
   };
@@ -282,23 +292,24 @@ export function ColorPickerPopover({
           const el = e.currentTarget;
           el.setPointerCapture(e.pointerId);
           const rect = el.getBoundingClientRect();
-          svDragRef.current = { pointerId: e.pointerId, rect };
-          svFromPointer(e, rect);
-        }}
-        onPointerMove={(e) => {
-          const drag = svDragRef.current;
-          if (!drag || drag.pointerId !== e.pointerId) return;
-          svFromPointer(e, drag.rect);
-        }}
-        onPointerUp={(e) => {
-          if (svDragRef.current?.pointerId === e.pointerId) {
+          const pointerId = e.pointerId;
+          svDragRef.current = { pointerId, rect };
+          applySv(e.clientX, e.clientY, rect);
+          const onMove = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            ev.preventDefault();
+            applySv(ev.clientX, ev.clientY, rect);
+          };
+          const onEnd = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onEnd);
+            window.removeEventListener("pointercancel", onEnd);
             svDragRef.current = null;
-          }
-        }}
-        onPointerCancel={(e) => {
-          if (svDragRef.current?.pointerId === e.pointerId) {
-            svDragRef.current = null;
-          }
+          };
+          window.addEventListener("pointermove", onMove, { passive: false });
+          window.addEventListener("pointerup", onEnd);
+          window.addEventListener("pointercancel", onEnd);
         }}
       >
         <span
@@ -328,23 +339,24 @@ export function ColorPickerPopover({
           const el = e.currentTarget;
           el.setPointerCapture(e.pointerId);
           const rect = el.getBoundingClientRect();
-          hueDragRef.current = { pointerId: e.pointerId, rect };
-          hueFromPointer(e, rect);
-        }}
-        onPointerMove={(e) => {
-          const drag = hueDragRef.current;
-          if (!drag || drag.pointerId !== e.pointerId) return;
-          hueFromPointer(e, drag.rect);
-        }}
-        onPointerUp={(e) => {
-          if (hueDragRef.current?.pointerId === e.pointerId) {
+          const pointerId = e.pointerId;
+          hueDragRef.current = { pointerId, rect };
+          applyHue(e.clientX, rect);
+          const onMove = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            ev.preventDefault();
+            applyHue(ev.clientX, rect);
+          };
+          const onEnd = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onEnd);
+            window.removeEventListener("pointercancel", onEnd);
             hueDragRef.current = null;
-          }
-        }}
-        onPointerCancel={(e) => {
-          if (hueDragRef.current?.pointerId === e.pointerId) {
-            hueDragRef.current = null;
-          }
+          };
+          window.addEventListener("pointermove", onMove, { passive: false });
+          window.addEventListener("pointerup", onEnd);
+          window.addEventListener("pointercancel", onEnd);
         }}
       >
         <span
