@@ -22,7 +22,6 @@
     "pdf-lib": "1.17.1",
     "pixi.js": "^8.6.0",
     "react": "^19.0.0",
-    "react-colorful": "^5.6.1",
     "react-dom": "^19.0.0",
     "react-router": "^7.1.0",
     "sonner": "^1.7.0",

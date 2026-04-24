@@ -35,9 +35,10 @@ test("color picker popover stays on-screen and is styled consistently", async ({
 
   // No native color input anywhere — every control must be custom.
   await expect(popover.locator('input[type="color"]')).toHaveCount(0);
-  // react-colorful renders saturation + hue as role="slider" divs.
-  await expect(popover.locator('[role="slider"]')).toHaveCount(2);
-  await expect(popover.locator(".react-colorful")).toBeVisible();
+  await expect(
+    popover.getByRole("slider", { name: "Saturation and value" }),
+  ).toBeVisible();
+  await expect(popover.getByRole("slider", { name: "Hue" })).toBeVisible();
 
   // Popover sits entirely inside the viewport.
   const box = await popover.boundingBox();

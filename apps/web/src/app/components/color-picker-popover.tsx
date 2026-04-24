@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { HexColorPicker } from "react-colorful";
+import { parseHexColor } from "@/solver/physics";
 
 interface ColorPickerPopoverProps {
   value: string;
@@ -28,6 +28,12 @@ const DEFAULT_PRESETS = [
   "#a81c88",
 ];
 
+interface Hsv {
+  h: number;
+  s: number;
+  v: number;
+}
+
 function clampHex(hex: string): string {
   const trimmed = hex.trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(trimmed)) return trimmed;
@@ -39,18 +45,76 @@ function clampHex(hex: string): string {
   return "";
 }
 
+function hexToHsv(hex: string): Hsv {
+  const rgb = parseHexColor(hex);
+  if (!rgb) return { h: 0, s: 0, v: 0 };
+  const r = rgb[0] / 255;
+  const g = rgb[1] / 255;
+  const b = rgb[2] / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  const v = max;
+  const s = max === 0 ? 0 : delta / max;
+  let h = 0;
+  if (delta !== 0) {
+    if (max === r) h = ((g - b) / delta) % 6;
+    else if (max === g) h = (b - r) / delta + 2;
+    else h = (r - g) / delta + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s, v };
+}
+
+function hsvToHex({ h, s, v }: Hsv): string {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) {
+    r = c;
+    g = x;
+  } else if (h < 120) {
+    r = x;
+    g = c;
+  } else if (h < 180) {
+    g = c;
+    b = x;
+  } else if (h < 240) {
+    g = x;
+    b = c;
+  } else if (h < 300) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+  const toHex = (n: number) => Math.round((n + m) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 /**
- * Stylized color picker tailored to the app's design system: HSV
- * saturation-value square + hue bar via `react-colorful`, which has
- * a battle-tested drag implementation on iOS Safari / Android Chrome
- * (mouse + touch events, window-level listeners, single-pointer
- * tracking). Hex input and preset chips are rendered above / below.
+ * Stylized color picker tuned for iOS Safari. The critical detail is
+ * that the marker dots are positioned via `transform: translate3d(…)`
+ * — a composite-only operation that iOS Safari does NOT throttle
+ * during touch gestures. Earlier attempts with `left: %` / `top: %`
+ * produced visible position lag (paint kept up via background-color
+ * but layout updates were deprioritized while a touch was active),
+ * which manifested as the marker drifting away from the finger and
+ * showing a position that didn't match the picked color.
  *
- * Positioning: `position: fixed` with JS-computed coordinates so the
- * popover can't widen the page or trigger a horizontal scrollbar. We
- * clamp left against the tightest available viewport measurement so
- * mobile URL-bar / scrollbar variance can't push the popover off-screen.
- * Closes on outside pointer or Escape.
+ * Drag commits are deferred to release: local hsv updates at the
+ * touch-event rate (live preview swatch + hex), but onChange to the
+ * parent fires once at touchend / mouseup, so the global solver
+ * store doesn't churn through a re-render storm during the drag.
+ *
+ * Body scroll + touch-action are locked while the popover is open
+ * to suppress iOS rubber-band / address-bar gesture animations that
+ * also throttle layout.
  */
 export function ColorPickerPopover({
   value,
@@ -60,17 +124,21 @@ export function ColorPickerPopover({
   anchor,
 }: ColorPickerPopoverProps) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  const svRef = useRef<HTMLDivElement | null>(null);
+  const hueRef = useRef<HTMLDivElement | null>(null);
+  const svDragRef = useRef<{ id: number; rect: DOMRect } | null>(null);
+  const hueDragRef = useRef<{ id: number; rect: DOMRect } | null>(null);
+
   const [draft, setDraft] = useState(value);
+  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(value));
   const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
-  // The picker emits a hex on every pointermove. Each one used to flow
-  // to the global store, re-rendering ParameterRail + lines-canvas (which
-  // forces a layout flush via parent.clientWidth) on every frame. On iOS
-  // Safari that contention starves the picker's marker of paint budget —
-  // hsva tracks the finger correctly (color was accurate) but the marker
-  // DOM element jitters. Defer the upstream commit to drag-end: local
-  // draft updates at the event rate (live preview swatch + hex input
-  // inside the popover stay in sync), but the parent and the rest of
-  // the app see exactly one update per drag.
+  const [svSize, setSvSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [hueSize, setHueSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  // Refs let drag handlers always read the latest state without
+  // re-binding listeners per render.
+  const hsvRef = useRef(hsv);
+  hsvRef.current = hsv;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const pendingHexRef = useRef<string | null>(null);
@@ -82,8 +150,23 @@ export function ColorPickerPopover({
     if (hex) onChangeRef.current(hex);
   };
 
-  // Detach + flush on unmount so a closing popover always commits its
-  // last drag value.
+  // Lock body scroll + touch-action while the picker is open. iOS
+  // Safari throttles layout during any touch-driven gesture (address
+  // bar collapse, rubber-band, scroll), which would compete with the
+  // picker's marker even when there's no real scroll happening.
+  useEffect(() => {
+    const body = document.body;
+    const prevOverflow = body.style.overflow;
+    const prevTouchAction = body.style.touchAction;
+    body.style.overflow = "hidden";
+    body.style.touchAction = "none";
+    return () => {
+      body.style.overflow = prevOverflow;
+      body.style.touchAction = prevTouchAction;
+    };
+  }, []);
+
+  // Flush any pending drag value on unmount.
   useEffect(
     () => () => {
       flushPending();
@@ -113,22 +196,28 @@ export function ColorPickerPopover({
     };
   }, [onClose, anchor]);
 
-  // Lock body scroll + suppress touch-action while the popover is
-  // open. iOS Safari can jitter position: fixed children during any
-  // implicit touch-driven scroll attempt, even without an actual
-  // scroll happening — the address bar's collapse / expand counts
-  // and so do rubber-band attempts on ancestors. Killing both
-  // outright while editing a color is the most reliable iOS fix.
-  useEffect(() => {
-    const body = document.body;
-    const prevOverflow = body.style.overflow;
-    const prevTouchAction = body.style.touchAction;
-    body.style.overflow = "hidden";
-    body.style.touchAction = "none";
-    return () => {
-      body.style.overflow = prevOverflow;
-      body.style.touchAction = prevTouchAction;
+  // Measure SV / hue dimensions for transform-based marker positioning.
+  useLayoutEffect(() => {
+    const sv = svRef.current;
+    const hue = hueRef.current;
+    const measure = () => {
+      if (sv) {
+        const r = sv.getBoundingClientRect();
+        setSvSize({ width: r.width, height: r.height });
+      }
+      if (hue) {
+        const r = hue.getBoundingClientRect();
+        setHueSize({ width: r.width, height: r.height });
+      }
     };
+    measure();
+    const observer =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (observer) {
+      if (sv) observer.observe(sv);
+      if (hue) observer.observe(hue);
+    }
+    return () => observer?.disconnect();
   }, []);
 
   useLayoutEffect(() => {
@@ -157,19 +246,7 @@ export function ColorPickerPopover({
     };
   }, [anchor]);
 
-  const commitImmediate = (next: string) => {
-    const normalized = clampHex(next);
-    if (!normalized) return;
-    setDraft(normalized);
-    pendingHexRef.current = null;
-    onChangeRef.current(normalized);
-  };
-
-  const commit = (next: string) => {
-    const normalized = clampHex(next);
-    if (!normalized) return;
-    setDraft(normalized);
-    pendingHexRef.current = normalized;
+  const ensureDragEndListener = () => {
     if (dragEndAttachedRef.current) return;
     dragEndAttachedRef.current = true;
     const onEnd = () => {
@@ -181,9 +258,6 @@ export function ColorPickerPopover({
       window.removeEventListener("mouseup", onEnd);
       flushPending();
     };
-    // Listen on every release path the picker might take. react-colorful
-    // attaches the same listeners internally; ours fire after theirs so
-    // the final hex they emit is in pendingHexRef when we flush.
     window.addEventListener("pointerup", onEnd);
     window.addEventListener("pointercancel", onEnd);
     window.addEventListener("touchend", onEnd);
@@ -191,7 +265,93 @@ export function ColorPickerPopover({
     window.addEventListener("mouseup", onEnd);
   };
 
+  const commitImmediate = (next: string) => {
+    const normalized = clampHex(next);
+    if (!normalized) return;
+    setDraft(normalized);
+    setHsv(hexToHsv(normalized));
+    pendingHexRef.current = null;
+    onChangeRef.current(normalized);
+  };
+
+  const commitDrag = (newHsv: Hsv) => {
+    const hex = hsvToHex(newHsv);
+    setDraft(hex);
+    setHsv(newHsv);
+    pendingHexRef.current = hex;
+    ensureDragEndListener();
+  };
+
+  const applySv = (clientX: number, clientY: number, rect: DOMRect) => {
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    const s = Math.min(1, Math.max(0, x));
+    const v = Math.min(1, Math.max(0, 1 - y));
+    commitDrag({ ...hsvRef.current, s, v });
+  };
+
+  const applyHue = (clientX: number, rect: DOMRect) => {
+    const x = (clientX - rect.left) / rect.width;
+    const h = Math.min(360, Math.max(0, x * 360));
+    commitDrag({ ...hsvRef.current, h });
+  };
+
+  const startTouchDrag = (
+    rect: DOMRect,
+    identifier: number,
+    initialX: number,
+    initialY: number,
+    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
+    clearRef: () => void,
+  ) => {
+    apply(initialX, initialY, rect);
+    const findTouch = (ev: TouchEvent) => {
+      for (let i = 0; i < ev.touches.length; i += 1) {
+        const t = ev.touches.item(i);
+        if (t && t.identifier === identifier) return t;
+      }
+      return null;
+    };
+    const onMove = (ev: TouchEvent) => {
+      const t = findTouch(ev);
+      if (!t) return;
+      apply(t.clientX, t.clientY, rect);
+    };
+    const cleanup = () => {
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEndEvt);
+      window.removeEventListener("touchcancel", onEndEvt);
+      clearRef();
+    };
+    const onEndEvt = (ev: TouchEvent) => {
+      if (ev.touches.length === 0 || !findTouch(ev)) cleanup();
+    };
+    window.addEventListener("touchmove", onMove);
+    window.addEventListener("touchend", onEndEvt);
+    window.addEventListener("touchcancel", onEndEvt);
+  };
+
+  const startMouseDrag = (
+    rect: DOMRect,
+    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
+    clearRef: () => void,
+  ) => {
+    const onMove = (ev: MouseEvent) => {
+      ev.preventDefault();
+      apply(ev.clientX, ev.clientY, rect);
+    };
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onEndEvt);
+      clearRef();
+    };
+    const onEndEvt = () => cleanup();
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onEndEvt);
+  };
+
   const current = clampHex(draft) || value;
+  const pureHue = `hsl(${Math.round(hsv.h)}, 100%, 50%)`;
 
   return (
     <div
@@ -228,11 +388,115 @@ export function ColorPickerPopover({
         />
       </div>
 
-      <HexColorPicker
-        color={current}
-        onChange={commit}
-        style={{ width: "100%", height: 160 }}
-      />
+      <div
+        ref={svRef}
+        role="slider"
+        aria-label="Saturation and value"
+        aria-valuenow={Math.round(hsv.s * 100)}
+        tabIndex={0}
+        className="relative h-40 w-full cursor-crosshair touch-none select-none overflow-hidden rounded border border-line"
+        style={{
+          backgroundColor: pureHue,
+          backgroundImage:
+            "linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)), linear-gradient(to right, rgba(255,255,255,1), rgba(255,255,255,0))",
+        }}
+        onTouchStart={(e) => {
+          if (svDragRef.current) return;
+          const touch = e.changedTouches[0];
+          if (!touch) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          svDragRef.current = { id: touch.identifier, rect };
+          startTouchDrag(
+            rect,
+            touch.identifier,
+            touch.clientX,
+            touch.clientY,
+            applySv,
+            () => {
+              svDragRef.current = null;
+            },
+          );
+        }}
+        onPointerDown={(e) => {
+          if (e.pointerType !== "mouse") return;
+          if (svDragRef.current) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          svDragRef.current = { id: e.pointerId, rect };
+          applySv(e.clientX, e.clientY, rect);
+          startMouseDrag(rect, applySv, () => {
+            svDragRef.current = null;
+          });
+        }}
+      >
+        <span
+          aria-hidden
+          className="pointer-events-none absolute left-0 top-0 block h-4 w-4 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
+          style={{
+            // Transform-only positioning. iOS Safari deprioritizes
+            // layout updates (left/top changes) during touch gestures
+            // but always processes composite (transform) updates —
+            // this is the difference between a marker that lags the
+            // finger and one that tracks it.
+            transform: `translate3d(${hsv.s * svSize.width}px, ${(1 - hsv.v) * svSize.height}px, 0) translate(-50%, -50%)`,
+            backgroundColor: current,
+            willChange: "transform",
+          }}
+        />
+      </div>
+
+      <div
+        ref={hueRef}
+        role="slider"
+        aria-label="Hue"
+        aria-valuenow={Math.round(hsv.h)}
+        tabIndex={0}
+        className="relative h-4 w-full cursor-ew-resize touch-none select-none rounded border border-line"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",
+        }}
+        onTouchStart={(e) => {
+          if (hueDragRef.current) return;
+          const touch = e.changedTouches[0];
+          if (!touch) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          hueDragRef.current = { id: touch.identifier, rect };
+          startTouchDrag(
+            rect,
+            touch.identifier,
+            touch.clientX,
+            touch.clientY,
+            (x, _y, r) => applyHue(x, r),
+            () => {
+              hueDragRef.current = null;
+            },
+          );
+        }}
+        onPointerDown={(e) => {
+          if (e.pointerType !== "mouse") return;
+          if (hueDragRef.current) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          hueDragRef.current = { id: e.pointerId, rect };
+          applyHue(e.clientX, rect);
+          startMouseDrag(
+            rect,
+            (x, _y, r) => applyHue(x, r),
+            () => {
+              hueDragRef.current = null;
+            },
+          );
+        }}
+      >
+        <span
+          aria-hidden
+          className="pointer-events-none absolute left-0 top-1/2 block h-5 w-2 rounded border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
+          style={{
+            transform: `translate3d(${(hsv.h / 360) * hueSize.width}px, 0, 0) translate(-50%, -50%)`,
+            backgroundColor: pureHue,
+            willChange: "transform",
+          }}
+        />
+      </div>
 
       <div>
         <p className="mb-1.5 text-[11px] uppercase tracking-wide text-muted">
