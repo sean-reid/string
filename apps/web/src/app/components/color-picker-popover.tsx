@@ -119,14 +119,17 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const svRef = useRef<HTMLDivElement | null>(null);
   const hueRef = useRef<HTMLDivElement | null>(null);
+  // Local state is authoritative while the popover is open. Syncing
+  // back from `value` on every prop change creates a feedback loop:
+  // our own onChange writes to the parent store, the store hands a
+  // rounded hex back through `value`, and syncing HSV from that
+  // rounded hex fights the user's live drag — the marker dot
+  // ping-pongs between the user's latest pointer position and the
+  // quantized hex round-trip. The initial useState readers seed
+  // from `value` once; everything after is driven locally.
   const [draft, setDraft] = useState(value);
   const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(value));
   const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
-
-  useEffect(() => {
-    setDraft(value);
-    setHsv(hexToHsv(value));
-  }, [value]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
