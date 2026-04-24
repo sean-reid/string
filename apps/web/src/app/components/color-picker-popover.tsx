@@ -239,63 +239,72 @@ export function ColorPickerPopover({
   };
 
   /**
-   * Bind parallel pointer + touch listeners on window for the
-   * lifetime of a drag. iOS Safari delivers pointermove events
-   * unreliably for touch — positions can arrive stale or with
-   * clientX snapped to 0, which manifested as the marker jumping
-   * to an edge. Touch events don't have that problem on iOS, so we
-   * listen to both and let whichever fires first "claim" the drag,
-   * then ignore the other source to avoid double-applies on
-   * browsers that dispatch both.
+   * Touch-events-only drag path. iOS Safari's Pointer Events
+   * implementation for touch is unreliable: pointermove can arrive
+   * with stale clientX or get skipped, which drove the marker to
+   * the extremes during drag. TouchEvent.changedTouches[0].clientX
+   * doesn't have that bug — it's the canonical source of truth for
+   * touch coordinates on iOS and Android. We identify the drag by
+   * `touch.identifier` so a second finger can't hijack it.
    */
-  const startDrag = (
+  const startTouchDrag = (
     rect: DOMRect,
+    identifier: number,
     initialX: number,
     initialY: number,
-    pointerId: number,
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     onEnd: () => void,
   ) => {
     apply(initialX, initialY, rect);
-    let source: "pointer" | "touch" | null = null;
+    const findTouch = (ev: TouchEvent) => {
+      for (let i = 0; i < ev.changedTouches.length; i += 1) {
+        const t = ev.changedTouches.item(i);
+        if (t && t.identifier === identifier) return t;
+      }
+      return null;
+    };
+    const onMove = (ev: TouchEvent) => {
+      const t = findTouch(ev);
+      if (!t) return;
+      ev.preventDefault();
+      apply(t.clientX, t.clientY, rect);
+    };
     const cleanup = () => {
-      window.removeEventListener("pointermove", pointerMove);
-      window.removeEventListener("pointerup", pointerUp);
-      window.removeEventListener("pointercancel", pointerUp);
-      window.removeEventListener("touchmove", touchMove);
-      window.removeEventListener("touchend", touchEnd);
-      window.removeEventListener("touchcancel", touchEnd);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEndEvt);
+      window.removeEventListener("touchcancel", onEndEvt);
       onEnd();
     };
-    const pointerMove = (ev: PointerEvent) => {
-      if (ev.pointerId !== pointerId) return;
-      if (source === "touch") return;
-      source = "pointer";
-      ev.preventDefault();
+    const onEndEvt = (ev: TouchEvent) => {
+      if (!findTouch(ev)) return;
+      cleanup();
+    };
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onEndEvt);
+    window.addEventListener("touchcancel", onEndEvt);
+  };
+
+  /**
+   * Mouse-events-only drag path. Pointer events only end up here on
+   * desktop (`pointerType === "mouse"`); touch paths are handled by
+   * `startTouchDrag`.
+   */
+  const startMouseDrag = (
+    rect: DOMRect,
+    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
+    onEnd: () => void,
+  ) => {
+    const onMove = (ev: MouseEvent) => {
       apply(ev.clientX, ev.clientY, rect);
     };
-    const pointerUp = (ev: PointerEvent) => {
-      if (ev.pointerId !== pointerId) return;
-      if (source === "touch") return;
-      cleanup();
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onEndEvt);
+      onEnd();
     };
-    const touchMove = (ev: TouchEvent) => {
-      const touch = ev.changedTouches[0] ?? ev.touches[0];
-      if (!touch) return;
-      source = "touch";
-      ev.preventDefault();
-      apply(touch.clientX, touch.clientY, rect);
-    };
-    const touchEnd = () => {
-      if (source !== "touch") return;
-      cleanup();
-    };
-    window.addEventListener("pointermove", pointerMove, { passive: false });
-    window.addEventListener("pointerup", pointerUp);
-    window.addEventListener("pointercancel", pointerUp);
-    window.addEventListener("touchmove", touchMove, { passive: false });
-    window.addEventListener("touchend", touchEnd);
-    window.addEventListener("touchcancel", touchEnd);
+    const onEndEvt = () => cleanup();
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onEndEvt);
   };
 
   const pureHue = `hsl(${Math.round(hsv.h)}, 100%, 50%)`;
@@ -348,13 +357,30 @@ export function ColorPickerPopover({
           backgroundImage:
             "linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)), linear-gradient(to right, rgba(255,255,255,1), rgba(255,255,255,0))",
         }}
+        onTouchStart={(e) => {
+          if (svDragRef.current) return;
+          const touch = e.changedTouches[0];
+          if (!touch) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          svDragRef.current = { pointerId: touch.identifier, rect };
+          startTouchDrag(
+            rect,
+            touch.identifier,
+            touch.clientX,
+            touch.clientY,
+            applySv,
+            () => {
+              svDragRef.current = null;
+            },
+          );
+        }}
         onPointerDown={(e) => {
-          const el = e.currentTarget;
-          el.setPointerCapture(e.pointerId);
-          const rect = el.getBoundingClientRect();
-          const pointerId = e.pointerId;
-          svDragRef.current = { pointerId, rect };
-          startDrag(rect, e.clientX, e.clientY, pointerId, applySv, () => {
+          if (e.pointerType !== "mouse") return;
+          if (svDragRef.current) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          svDragRef.current = { pointerId: e.pointerId, rect };
+          applySv(e.clientX, e.clientY, rect);
+          startMouseDrag(rect, applySv, () => {
             svDragRef.current = null;
           });
         }}
@@ -382,17 +408,31 @@ export function ColorPickerPopover({
           backgroundImage:
             "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",
         }}
-        onPointerDown={(e) => {
-          const el = e.currentTarget;
-          el.setPointerCapture(e.pointerId);
-          const rect = el.getBoundingClientRect();
-          const pointerId = e.pointerId;
-          hueDragRef.current = { pointerId, rect };
-          startDrag(
+        onTouchStart={(e) => {
+          if (hueDragRef.current) return;
+          const touch = e.changedTouches[0];
+          if (!touch) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          hueDragRef.current = { pointerId: touch.identifier, rect };
+          startTouchDrag(
             rect,
-            e.clientX,
-            e.clientY,
-            pointerId,
+            touch.identifier,
+            touch.clientX,
+            touch.clientY,
+            (x, _y, r) => applyHue(x, r),
+            () => {
+              hueDragRef.current = null;
+            },
+          );
+        }}
+        onPointerDown={(e) => {
+          if (e.pointerType !== "mouse") return;
+          if (hueDragRef.current) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          hueDragRef.current = { pointerId: e.pointerId, rect };
+          applyHue(e.clientX, rect);
+          startMouseDrag(
+            rect,
             (x, _y, r) => applyHue(x, r),
             () => {
               hueDragRef.current = null;
