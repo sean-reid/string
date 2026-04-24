@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { parseHexColor } from "@/solver/physics";
 
 interface ColorPickerPopoverProps {
@@ -353,7 +354,9 @@ export function ColorPickerPopover({
   const current = clampHex(draft) || value;
   const pureHue = `hsl(${Math.round(hsv.h)}, 100%, 50%)`;
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       ref={popoverRef}
       role="dialog"
@@ -522,6 +525,7 @@ export function ColorPickerPopover({
           })}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
