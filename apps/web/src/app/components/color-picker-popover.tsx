@@ -62,6 +62,23 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState(value);
   const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
+  // The picker emits a hex on every pointermove. Bubbling each one to
+  // the parent (which writes to the global store and re-renders this
+  // popover) drowns iOS Safari's render budget and the picker's own
+  // marker can't keep up with the finger. Throttle the upstream
+  // commit to once per animation frame; local draft + the picker's
+  // own internal state still update at the full event rate so the
+  // marker tracks smoothly.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const pendingHexRef = useRef<string | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -111,11 +128,31 @@ export function ColorPickerPopover({
     };
   }, [anchor]);
 
+  const commitImmediate = (next: string) => {
+    const normalized = clampHex(next);
+    if (!normalized) return;
+    setDraft(normalized);
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    pendingHexRef.current = null;
+    onChangeRef.current(normalized);
+  };
+
   const commit = (next: string) => {
     const normalized = clampHex(next);
     if (!normalized) return;
     setDraft(normalized);
-    onChange(normalized);
+    pendingHexRef.current = normalized;
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        const hex = pendingHexRef.current;
+        pendingHexRef.current = null;
+        if (hex) onChangeRef.current(hex);
+      });
+    }
   };
 
   const current = clampHex(draft) || value;
@@ -143,11 +180,11 @@ export function ColorPickerPopover({
           aria-label="Hex color"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => commit(draft)}
+          onBlur={() => commitImmediate(draft)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              commit(draft);
+              commitImmediate(draft);
             }
           }}
           spellCheck={false}
@@ -174,7 +211,7 @@ export function ColorPickerPopover({
                 type="button"
                 aria-label={`Preset ${p}`}
                 aria-pressed={selected}
-                onClick={() => commit(p)}
+                onClick={() => commitImmediate(p)}
                 className={[
                   "h-6 w-full rounded border transition",
                   selected ? "border-ink" : "border-line hover:border-ink",
