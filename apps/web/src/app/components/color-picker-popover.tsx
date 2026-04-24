@@ -139,6 +139,31 @@ export function ColorPickerPopover({
   const [draft, setDraft] = useState(value);
   const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(value));
   const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
+  const [svSize, setSvSize] = useState<{ width: number; height: number } | null>(null);
+  const [hueSize, setHueSize] = useState<{ width: number; height: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const svEl = svRef.current;
+    const hueEl = hueRef.current;
+    const measure = () => {
+      if (svEl) {
+        const r = svEl.getBoundingClientRect();
+        setSvSize({ width: r.width, height: r.height });
+      }
+      if (hueEl) {
+        const r = hueEl.getBoundingClientRect();
+        setHueSize({ width: r.width, height: r.height });
+      }
+    };
+    measure();
+    const observer =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (observer) {
+      if (svEl) observer.observe(svEl);
+      if (hueEl) observer.observe(hueEl);
+    }
+    return () => observer?.disconnect();
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -239,58 +264,14 @@ export function ColorPickerPopover({
   };
 
   /**
-   * Lock body scroll for the lifetime of a drag and batch apply
-   * calls to animation frames. iOS Safari can schedule touchmove
-   * events at higher-than-frame rates and can rubber-band scroll
-   * even with touch-action: none on the dragged element — scroll
-   * lock + one apply per rAF eliminates both sources of jitter.
-   */
-  const createRafApply = (
-    rect: DOMRect,
-    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
-  ) => {
-    let rafId: number | null = null;
-    let pending: { x: number; y: number } | null = null;
-    const run = () => {
-      rafId = null;
-      if (!pending) return;
-      apply(pending.x, pending.y, rect);
-      pending = null;
-    };
-    return {
-      schedule(x: number, y: number) {
-        pending = { x, y };
-        if (rafId === null) rafId = requestAnimationFrame(run);
-      },
-      flush() {
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId);
-          rafId = null;
-        }
-        if (pending) {
-          apply(pending.x, pending.y, rect);
-          pending = null;
-        }
-      },
-    };
-  };
-
-  const lockBodyScroll = () => {
-    const body = document.body;
-    const prev = body.style.overflow;
-    body.style.overflow = "hidden";
-    return () => {
-      body.style.overflow = prev;
-    };
-  };
-
-  /**
-   * Touch-events-only drag path. iOS Safari's Pointer Events for
-   * touch are unreliable — clientX snaps to 0 or arrives stale,
-   * driving the marker to an edge. TouchEvent.changedTouches[0]
-   * is the canonical source of truth on iOS. The drag is pinned
-   * to a single `touch.identifier` so a second finger can't hijack
-   * it.
+   * Touch-events-only drag path. Matches react-colorful's approach:
+   * window-level touchmove listener, identify the tracked finger in
+   * `event.touches` (not changedTouches — changedTouches only lists
+   * the points that changed in this event, but our tracked finger
+   * is always in the full `touches` list on every touchmove). No
+   * preventDefault on touch — browsers made touch listeners passive
+   * by default and the `touch-action: none` CSS on the drag surface
+   * is what actually prevents page scroll.
    */
   const startTouchDrag = (
     rect: DOMRect,
@@ -300,12 +281,10 @@ export function ColorPickerPopover({
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     onEnd: () => void,
   ) => {
-    const unlock = lockBodyScroll();
-    const scheduler = createRafApply(rect, apply);
     apply(initialX, initialY, rect);
     const findTouch = (ev: TouchEvent) => {
-      for (let i = 0; i < ev.changedTouches.length; i += 1) {
-        const t = ev.changedTouches.item(i);
+      for (let i = 0; i < ev.touches.length; i += 1) {
+        const t = ev.touches.item(i);
         if (t && t.identifier === identifier) return t;
       }
       return null;
@@ -313,22 +292,18 @@ export function ColorPickerPopover({
     const onMove = (ev: TouchEvent) => {
       const t = findTouch(ev);
       if (!t) return;
-      ev.preventDefault();
-      scheduler.schedule(t.clientX, t.clientY);
+      apply(t.clientX, t.clientY, rect);
     };
     const cleanup = () => {
-      scheduler.flush();
       window.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onEndEvt);
       window.removeEventListener("touchcancel", onEndEvt);
-      unlock();
       onEnd();
     };
     const onEndEvt = (ev: TouchEvent) => {
-      if (!findTouch(ev)) return;
-      cleanup();
+      if (ev.touches.length === 0 || !findTouch(ev)) cleanup();
     };
-    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchmove", onMove);
     window.addEventListener("touchend", onEndEvt);
     window.addEventListener("touchcancel", onEndEvt);
   };
@@ -343,12 +318,11 @@ export function ColorPickerPopover({
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     onEnd: () => void,
   ) => {
-    const scheduler = createRafApply(rect, apply);
     const onMove = (ev: MouseEvent) => {
-      scheduler.schedule(ev.clientX, ev.clientY);
+      ev.preventDefault();
+      apply(ev.clientX, ev.clientY, rect);
     };
     const cleanup = () => {
-      scheduler.flush();
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onEndEvt);
       onEnd();
@@ -438,11 +412,14 @@ export function ColorPickerPopover({
       >
         <span
           aria-hidden
-          className="pointer-events-none absolute block h-3 w-3 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+          className="pointer-events-none absolute left-0 top-0 block h-3 w-3 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
           style={{
-            left: `${hsv.s * 100}%`,
-            top: `${(1 - hsv.v) * 100}%`,
-            transform: "translate(-50%, -50%)",
+            // Transform-only positioning: no left/top layout updates
+            // during drag, so iOS Safari doesn't throttle marker
+            // movement the way it does for layout-dirtying changes.
+            transform: svSize
+              ? `translate3d(${hsv.s * svSize.width}px, ${(1 - hsv.v) * svSize.height}px, 0) translate(-50%, -50%)`
+              : "translate(-50%, -50%)",
             backgroundColor: current,
           }}
         />
@@ -493,10 +470,11 @@ export function ColorPickerPopover({
       >
         <span
           aria-hidden
-          className="pointer-events-none absolute top-1/2 block h-5 w-2 rounded border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+          className="pointer-events-none absolute left-0 top-1/2 block h-5 w-2 rounded border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
           style={{
-            left: `${(hsv.h / 360) * 100}%`,
-            transform: "translate(-50%, -50%)",
+            transform: hueSize
+              ? `translate3d(${(hsv.h / 360) * hueSize.width}px, 0, 0) translate(-50%, -50%)`
+              : "translate(-50%, -50%)",
             backgroundColor: pureHue,
           }}
         />
