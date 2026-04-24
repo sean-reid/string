@@ -113,6 +113,24 @@ export function ColorPickerPopover({
     };
   }, [onClose, anchor]);
 
+  // Lock body scroll + suppress touch-action while the popover is
+  // open. iOS Safari can jitter position: fixed children during any
+  // implicit touch-driven scroll attempt, even without an actual
+  // scroll happening — the address bar's collapse / expand counts
+  // and so do rubber-band attempts on ancestors. Killing both
+  // outright while editing a color is the most reliable iOS fix.
+  useEffect(() => {
+    const body = document.body;
+    const prevOverflow = body.style.overflow;
+    const prevTouchAction = body.style.touchAction;
+    body.style.overflow = "hidden";
+    body.style.touchAction = "none";
+    return () => {
+      body.style.overflow = prevOverflow;
+      body.style.touchAction = prevTouchAction;
+    };
+  }, []);
+
   useLayoutEffect(() => {
     if (!anchor) return;
     const measure = () => {
