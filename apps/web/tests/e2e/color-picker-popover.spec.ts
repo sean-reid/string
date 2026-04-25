@@ -113,7 +113,8 @@ test("color picker drag tracks pointer position end-to-end", async ({
     .locator('[aria-label="Saturation and value"] span[aria-hidden]')
     .first()
     .evaluate((el) => (el as HTMLElement).style.transform);
-  const match = /translate3d\(([^,]+),\s*([^,]+),\s*0\)/.exec(transform);
+  // WebKit serializes the z component as "0px"; Chromium as "0". Accept both.
+  const match = /translate3d\(([^,]+),\s*([^,]+),\s*0(?:px)?\)/.exec(transform);
   expect(match, `transform: ${transform}`).not.toBeNull();
   if (match) {
     const x = Number.parseFloat(match[1] ?? "0");
