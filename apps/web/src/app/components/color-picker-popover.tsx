@@ -345,62 +345,46 @@ export function ColorPickerPopover({
     commitDrag(next);
   };
 
-  const startTouchDrag = (
-    rect: DOMRect,
-    identifier: number,
-    initialX: number,
-    initialY: number,
-    apply: (clientX: number, clientY: number, rect: DOMRect) => void,
-    clearRef: () => void,
-  ) => {
-    apply(initialX, initialY, rect);
-    const findTouch = (ev: TouchEvent) => {
-      for (let i = 0; i < ev.touches.length; i += 1) {
-        const t = ev.touches.item(i);
-        if (t && t.identifier === identifier) return t;
-      }
-      return null;
-    };
-    const onMove = (ev: TouchEvent) => {
-      const t = findTouch(ev);
-      if (!t) return;
-      // preventDefault keeps iOS Safari from reclassifying this touch
-      // as a scroll/zoom gesture mid-drag, which throttles touchmove
-      // delivery. Requires { passive: false } on the listener.
-      if (ev.cancelable) ev.preventDefault();
-      apply(t.clientX, t.clientY, rect);
-    };
-    const cleanup = () => {
-      window.removeEventListener("touchmove", onMove);
-      window.removeEventListener("touchend", onEndEvt);
-      window.removeEventListener("touchcancel", onEndEvt);
-      clearRef();
-    };
-    const onEndEvt = (ev: TouchEvent) => {
-      if (ev.touches.length === 0 || !findTouch(ev)) cleanup();
-    };
-    window.addEventListener("touchmove", onMove, { passive: false });
-    window.addEventListener("touchend", onEndEvt);
-    window.addEventListener("touchcancel", onEndEvt);
-  };
-
-  const startMouseDrag = (
+  // Single drag path for mouse + touch + pen via pointer capture. iOS
+  // Safari delivers pointermove during a captured gesture more
+  // reliably than window-level touchmove (the latter gets coalesced
+  // when the page is paint-busy), and capture also fires moves even
+  // when the finger drifts outside the SV / hue rect.
+  const startPointerDrag = (
+    target: HTMLElement,
+    pointerId: number,
     rect: DOMRect,
     apply: (clientX: number, clientY: number, rect: DOMRect) => void,
     clearRef: () => void,
   ) => {
-    const onMove = (ev: MouseEvent) => {
-      ev.preventDefault();
+    try {
+      target.setPointerCapture(pointerId);
+    } catch {
+      // setPointerCapture can throw if the pointer was already
+      // released — fall back to letting events fire normally.
+    }
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       apply(ev.clientX, ev.clientY, rect);
     };
     const cleanup = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onEndEvt);
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onEnd);
+      target.removeEventListener("pointercancel", onEnd);
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        // Already released. Safe to ignore.
+      }
       clearRef();
     };
-    const onEndEvt = () => cleanup();
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onEndEvt);
+    const onEnd = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      cleanup();
+    };
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onEnd);
+    target.addEventListener("pointercancel", onEnd);
   };
 
   const current = clampHex(draft) || value;
@@ -424,7 +408,12 @@ export function ColorPickerPopover({
         <span
           aria-hidden
           className="h-8 w-8 shrink-0 rounded border border-line"
-          style={{ backgroundColor: current }}
+          // 60ms compositor-driven background transition. iOS Safari
+          // throttles paint commits during touch but runs CSS
+          // transitions on the animation pipeline at full refresh
+          // rate, so this masks the discrete style mutations the
+          // drag produces.
+          style={{ backgroundColor: current, transition: "background-color 60ms linear" }}
         />
         <input
           type="text"
@@ -455,30 +444,13 @@ export function ColorPickerPopover({
           backgroundImage:
             "linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)), linear-gradient(to right, rgba(255,255,255,1), rgba(255,255,255,0))",
         }}
-        onTouchStart={(e) => {
-          if (svDragRef.current) return;
-          const touch = e.changedTouches[0];
-          if (!touch) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          svDragRef.current = { id: touch.identifier, rect };
-          startTouchDrag(
-            rect,
-            touch.identifier,
-            touch.clientX,
-            touch.clientY,
-            applySv,
-            () => {
-              svDragRef.current = null;
-            },
-          );
-        }}
         onPointerDown={(e) => {
-          if (e.pointerType !== "mouse") return;
           if (svDragRef.current) return;
-          const rect = e.currentTarget.getBoundingClientRect();
+          const target = e.currentTarget as HTMLDivElement;
+          const rect = target.getBoundingClientRect();
           svDragRef.current = { id: e.pointerId, rect };
           applySv(e.clientX, e.clientY, rect);
-          startMouseDrag(rect, applySv, () => {
+          startPointerDrag(target, e.pointerId, rect, applySv, () => {
             svDragRef.current = null;
           });
         }}
@@ -488,17 +460,16 @@ export function ColorPickerPopover({
           aria-hidden
           className="pointer-events-none absolute left-0 top-0 block h-4 w-4 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
           style={{
-            // Transform-only positioning. iOS Safari deprioritizes
-            // layout updates (left/top changes) during touch gestures
-            // but always processes composite (transform) updates —
-            // this is the difference between a marker that lags the
-            // finger and one that tracks it. The drag handlers also
-            // overwrite this style directly via svMarkerRef on every
-            // touchmove so the marker keeps tracking even when the
-            // React render path is starved.
+            // CSS transitions run on the compositor's animation
+            // pipeline independently of style-mutation rate, so the
+            // marker visually slides between the discrete positions
+            // iOS Safari commits during touch instead of snapping.
+            // Drag handlers also overwrite these styles directly via
+            // svMarkerRef so the target value is always current.
             transform: `translate3d(${hsv.s * svSize.width}px, ${(1 - hsv.v) * svSize.height}px, 0) translate(-50%, -50%)`,
             backgroundColor: current,
             willChange: "transform",
+            transition: "transform 60ms linear, background-color 60ms linear",
           }}
         />
       </div>
@@ -514,30 +485,15 @@ export function ColorPickerPopover({
           backgroundImage:
             "linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)",
         }}
-        onTouchStart={(e) => {
-          if (hueDragRef.current) return;
-          const touch = e.changedTouches[0];
-          if (!touch) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          hueDragRef.current = { id: touch.identifier, rect };
-          startTouchDrag(
-            rect,
-            touch.identifier,
-            touch.clientX,
-            touch.clientY,
-            (x, _y, r) => applyHue(x, r),
-            () => {
-              hueDragRef.current = null;
-            },
-          );
-        }}
         onPointerDown={(e) => {
-          if (e.pointerType !== "mouse") return;
           if (hueDragRef.current) return;
-          const rect = e.currentTarget.getBoundingClientRect();
+          const target = e.currentTarget as HTMLDivElement;
+          const rect = target.getBoundingClientRect();
           hueDragRef.current = { id: e.pointerId, rect };
           applyHue(e.clientX, rect);
-          startMouseDrag(
+          startPointerDrag(
+            target,
+            e.pointerId,
             rect,
             (x, _y, r) => applyHue(x, r),
             () => {
@@ -554,6 +510,7 @@ export function ColorPickerPopover({
             transform: `translate3d(${(hsv.h / 360) * hueSize.width}px, 0, 0) translate(-50%, -50%)`,
             backgroundColor: pureHue,
             willChange: "transform",
+            transition: "transform 60ms linear, background-color 60ms linear",
           }}
         />
       </div>
