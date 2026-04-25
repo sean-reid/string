@@ -127,6 +127,8 @@ export function ColorPickerPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const svRef = useRef<HTMLDivElement | null>(null);
   const hueRef = useRef<HTMLDivElement | null>(null);
+  const svMarkerRef = useRef<HTMLSpanElement | null>(null);
+  const hueMarkerRef = useRef<HTMLSpanElement | null>(null);
   const svDragRef = useRef<{ id: number; rect: DOMRect } | null>(null);
   const hueDragRef = useRef<{ id: number; rect: DOMRect } | null>(null);
 
@@ -140,6 +142,10 @@ export function ColorPickerPopover({
   // re-binding listeners per render.
   const hsvRef = useRef(hsv);
   hsvRef.current = hsv;
+  const svSizeRef = useRef(svSize);
+  svSizeRef.current = svSize;
+  const hueSizeRef = useRef(hueSize);
+  hueSizeRef.current = hueSize;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const pendingHexRef = useRef<string | null>(null);
@@ -291,18 +297,52 @@ export function ColorPickerPopover({
     ensureDragEndListener();
   };
 
+  // Direct DOM writes for the marker dots. iOS Safari deprioritizes the
+  // composite layer that hosts these elements during a touch gesture —
+  // even though setHsv() runs at the touch-event rate, the resulting
+  // transform paint can lag the finger by a full second in the worst
+  // case. Writing style.transform on every move event puts the visual
+  // update onto the same path iOS reserves for input scrolling, which
+  // it does NOT throttle, so the marker tracks the finger 1:1 even
+  // when React's render pipeline is starved.
+  const writeSvMarker = (s: number, v: number, hex: string) => {
+    const el = svMarkerRef.current;
+    if (!el) return;
+    const { width, height } = svSizeRef.current;
+    el.style.transform = `translate3d(${s * width}px, ${(1 - v) * height}px, 0) translate(-50%, -50%)`;
+    el.style.backgroundColor = hex;
+  };
+
+  const writeHueMarker = (h: number, hex: string) => {
+    const el = hueMarkerRef.current;
+    if (!el) return;
+    const { width } = hueSizeRef.current;
+    el.style.transform = `translate3d(${(h / 360) * width}px, 0, 0) translate(-50%, -50%)`;
+    el.style.backgroundColor = `hsl(${Math.round(h)}, 100%, 50%)`;
+    const sv = svRef.current;
+    if (sv) sv.style.backgroundColor = `hsl(${Math.round(h)}, 100%, 50%)`;
+    const svMarker = svMarkerRef.current;
+    if (svMarker) svMarker.style.backgroundColor = hex;
+  };
+
   const applySv = (clientX: number, clientY: number, rect: DOMRect) => {
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
     const s = Math.min(1, Math.max(0, x));
     const v = Math.min(1, Math.max(0, 1 - y));
-    commitDrag({ ...hsvRef.current, s, v });
+    const next = { ...hsvRef.current, s, v };
+    const hex = hsvToHex(next);
+    writeSvMarker(s, v, hex);
+    commitDrag(next);
   };
 
   const applyHue = (clientX: number, rect: DOMRect) => {
     const x = (clientX - rect.left) / rect.width;
     const h = Math.min(360, Math.max(0, x * 360));
-    commitDrag({ ...hsvRef.current, h });
+    const next = { ...hsvRef.current, h };
+    const hex = hsvToHex(next);
+    writeHueMarker(h, hex);
+    commitDrag(next);
   };
 
   const startTouchDrag = (
@@ -324,6 +364,10 @@ export function ColorPickerPopover({
     const onMove = (ev: TouchEvent) => {
       const t = findTouch(ev);
       if (!t) return;
+      // preventDefault keeps iOS Safari from reclassifying this touch
+      // as a scroll/zoom gesture mid-drag, which throttles touchmove
+      // delivery. Requires { passive: false } on the listener.
+      if (ev.cancelable) ev.preventDefault();
       apply(t.clientX, t.clientY, rect);
     };
     const cleanup = () => {
@@ -335,7 +379,7 @@ export function ColorPickerPopover({
     const onEndEvt = (ev: TouchEvent) => {
       if (ev.touches.length === 0 || !findTouch(ev)) cleanup();
     };
-    window.addEventListener("touchmove", onMove);
+    window.addEventListener("touchmove", onMove, { passive: false });
     window.addEventListener("touchend", onEndEvt);
     window.addEventListener("touchcancel", onEndEvt);
   };
@@ -440,6 +484,7 @@ export function ColorPickerPopover({
         }}
       >
         <span
+          ref={svMarkerRef}
           aria-hidden
           className="pointer-events-none absolute left-0 top-0 block h-4 w-4 rounded-full border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
           style={{
@@ -447,7 +492,10 @@ export function ColorPickerPopover({
             // layout updates (left/top changes) during touch gestures
             // but always processes composite (transform) updates —
             // this is the difference between a marker that lags the
-            // finger and one that tracks it.
+            // finger and one that tracks it. The drag handlers also
+            // overwrite this style directly via svMarkerRef on every
+            // touchmove so the marker keeps tracking even when the
+            // React render path is starved.
             transform: `translate3d(${hsv.s * svSize.width}px, ${(1 - hsv.v) * svSize.height}px, 0) translate(-50%, -50%)`,
             backgroundColor: current,
             willChange: "transform",
@@ -499,6 +547,7 @@ export function ColorPickerPopover({
         }}
       >
         <span
+          ref={hueMarkerRef}
           aria-hidden
           className="pointer-events-none absolute left-0 top-1/2 block h-5 w-2 rounded border-2 border-paper shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
           style={{
